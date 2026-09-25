@@ -3,125 +3,10 @@ import { Suspense, useLayoutEffect, useMemo, useRef, type ComponentRef } from "r
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { MapControls, useTexture } from "@react-three/drei"
 import * as THREE from "three"
-import { MAP } from "@/lib/map"
 import LAND from "@/public/maps/3d/land-bounds.json" // npm run gen3d
-import Pins from "./Pins"
-
-// ---- every tunable of the spike (world units: the map is MAP.w/100 x MAP.h/100 = 9.03 x 6.73) ----
-export const LAB3D = {
-  map: { w: MAP.w / 100, h: MAP.h / 100 },
-  segments: [512, 382] as const,
-  displacementScale: 0.12,   // world units at height 1.0; subtle, so lettering on the land doesn't warp
-  reliefExaggeration: 3.5,   // shading slopes x this (normals come from the heightmap in the shader; the
-                             // geometry keeps displacementScale). gen-3d's preview mirrors it.
-  world: 3,                  // world sea plane: square, this x the map width
-  seaTilesAcrossMap: 8,      // sea-tile.webp repeats: must match gen-3d (4096px map / 512px tile)
-  worldFade: [0.62, 0.98],   // world plane: opaque out to this fraction of its half-size, gone at the second (radial)
-  fov: 40,
-  // framing: the start "covers" the screen with the land's bounding box (public/maps/3d/land-bounds.json);
-  // zooming out goes on to "contain": the whole box plus a sea margin in view, slightly tilted so the far sea
-  // recedes into the fog (the world floating in the sea). Panning keeps the view inside the land box at cover
-  // and closer, and the land inside the view at contain.
-  minDistance: 1.1,          // max zoom-in
-  pitch: [0.05, 0.85] as const, // rad from straight down: at cover -> fully zoomed in
-  containPitch: 0.25,        // rad from straight down at contain (max zoom-out), easing into pitch[0] by cover
-  containMargin: 0.12,       // sea around the land box at contain, x the box's width
-  fog: [1.6, 3.2] as const,  // fog near/far, x the camera distance (tilted views fade into the background)
-  containFog: [1.05, 1.15] as const, // the same at contain, easing into fog by cover: the far sea hazes over
-  background: "#412511",
-  // together they light flat ground at about the texture's own colour (slightly warm); the sun is high (58 deg
-  // up), so slopes turned away shade gently instead of falling into long dark bands. gen-3d's preview mirrors it.
-  sun: { color: "#fff0de", intensity: 1.8, position: [-7, 13.8, -5] as const }, // top-left of the map, high
-  ambient: { color: "#f7f9ff", intensity: 1.61 },
-  // screen-space light over the canvas, ported from the 2D map's ScreenAtmos (components/map/Atmosphere.tsx):
-  // a dark vignette and a warm candle glow from the top-left, plain rgba gradients (static here, no flicker)
-  vignette: 0.5,
-  glow: { color: "255,208,150", opacity: 0.16 },
-  cloudOpacity: 0.8,
-  cloudFade: [0.3, 0.5] as const, // zoom progress: clouds fade from the first value, gone by the midpoint
-  // x/y: fractions of the map (outside 0..1 = over the open sea), y height above the sea, size = width
-  clouds: [
-    { tex: 1, x: 0.03, y: 0.2, height: 0.45, size: 3.4, rot: 0.2 },
-    { tex: 2, x: 0.97, y: 0.16, height: 0.6, size: 3.0, rot: -0.3 },
-    { tex: 3, x: 0.06, y: 0.93, height: 0.35, size: 3.2, rot: 0.5 },
-    { tex: 4, x: 0.95, y: 0.9, height: 0.5, size: 3.6, rot: -0.1 },
-    { tex: 1, x: 0.52, y: 0.06, height: 0.3, size: 2.8, rot: 3.0 },
-  ],
-}
-
-const { w: W, h: H } = LAB3D.map
-const SEA = LAB3D.world * W
-// zoom progress, 0 fully out .. 1 fully in; written by CameraRig every frame, read by the clouds (not React state)
-const view = { t: 0 }
-const smoothstep = (a: number, b: number, v: number) => {
-  const x = Math.min(1, Math.max(0, (v - a) / (b - a)))
-  return x * x * (3 - 2 * x)
-}
-
-// colour textures in sRGB; the heightmap stays linear
-const srgb = (tex: THREE.Texture | THREE.Texture[]) => {
-  for (const t of Array.isArray(tex) ? tex : [tex]) {
-    if (t.colorSpace === THREE.SRGBColorSpace) continue
-    t.colorSpace = THREE.SRGBColorSpace
-    t.anisotropy = 8
-    t.needsUpdate = true
-  }
-}
-
-// Normals from the heightmap in the fragment shader, so there's no normal map: central differences of the
-// 16-bit height (R = high byte, G = low byte), a texel apart (a screen pixel apart when zoomed out, via
-// fwidth), as the normal of the flat-lying plane (u = +x, v = north = -z), then into view space.
-function reliefNormals(heightMap: THREE.Texture) {
-  const img = heightMap.image as { width: number; height: number }
-  const slope = (LAB3D.displacementScale / (2 * (W / img.width))) * LAB3D.reliefExaggeration
-  return (shader: THREE.WebGLProgramParametersWithUniforms) => {
-    shader.uniforms.reliefMap = { value: heightMap }
-    shader.uniforms.reliefTexel = { value: new THREE.Vector2(1 / img.width, 1 / img.height) }
-    shader.uniforms.reliefSlope = { value: slope }
-    shader.fragmentShader = shader.fragmentShader
-      .replace(
-        "#include <common>",
-        `#include <common>
-uniform sampler2D reliefMap;
-uniform vec2 reliefTexel;
-uniform float reliefSlope;
-float reliefAt(vec2 uv) { vec4 t = texture2D(reliefMap, uv); return t.r * 0.996109 + t.g * 0.003891; }`,
-      )
-      .replace(
-        "#include <normal_fragment_maps>",
-        `vec2 reliefStep = max(reliefTexel, fwidth(vMapUv));
-vec2 reliefK = reliefSlope * reliefTexel / reliefStep;
-float reliefL = reliefAt(vMapUv - vec2(reliefStep.x, 0.0));
-float reliefR = reliefAt(vMapUv + vec2(reliefStep.x, 0.0));
-float reliefD = reliefAt(vMapUv - vec2(0.0, reliefStep.y));
-float reliefU = reliefAt(vMapUv + vec2(0.0, reliefStep.y));
-vec3 reliefN = normalize(vec3((reliefL - reliefR) * reliefK.x, 1.0, (reliefU - reliefD) * reliefK.y));
-normal = normalize((viewMatrix * vec4(reliefN, 0.0)).xyz);`,
-      )
-  }
-}
-
-function Terrain() {
-  const color = useTexture("/maps/3d/color.webp", srgb)
-  const height = useTexture("/maps/3d/height.png")
-  const onBeforeCompile = useMemo(() => reliefNormals(height), [height])
-  return (
-    <>
-      <mesh rotation-x={-Math.PI / 2}>
-        <planeGeometry args={[W, H, ...LAB3D.segments]} />
-        <meshStandardMaterial
-          map={color}
-          displacementMap={height}
-          displacementScale={LAB3D.displacementScale}
-          onBeforeCompile={onBeforeCompile}
-          roughness={1}
-          metalness={0}
-        />
-      </mesh>
-      <Pins heightMap={height} scale={LAB3D.displacementScale} />
-    </>
-  )
-}
+import { LAB3D, W, H, SEA, srgb } from "./config"
+import { view, tier, focal, smoothstep } from "./reveal"
+import Terrain from "./Terrain"
 
 // The sea around the map: the same tile gen-3d paints into the map's sea margin, on the same grid (a tile
 // boundary on the map's top-left corner), so map and sea meet without a seam. Drawn behind the map
@@ -210,6 +95,7 @@ function CameraRig() {
   const scene = useThree((s) => s.scene)
   const invalidate = useThree((s) => s.invalidate)
   const placed = useRef(false)
+  const shownTier = useRef({ terrain: false, detail: false })
   const lim = useMemo(() => {
     const tan = Math.tan(((LAB3D.fov / 2) * Math.PI) / 180)
     const aspect = size.width / Math.max(1, size.height)
@@ -220,9 +106,9 @@ function CameraRig() {
     const m = LAB3D.containMargin * (x1 - x0)
     const f = footprint(LAB3D.containPitch, 1, tan, aspect)
     const dContain = Math.max(dCover * 1.05, (z1 - z0 + 2 * m) / (f.near - f.far), (x1 - x0 + 2 * m) / (2 * f.halfWidth))
-    // zoom state at camera distance d: t = 0 at cover .. 1 fully in (the clouds read it), out = 0 at cover ..
-    // 1 at contain. The pitch and the fog ease from their contain values into their cover values (flat there),
-    // then the pitch follows the in-curve.
+    // zoom state at camera distance d: t = 0 at cover .. 1 fully in (the clouds and the tier reveal read it),
+    // out = 0 at cover .. 1 at contain. The pitch and the fog ease from their contain values into their cover
+    // values (flat there), then the pitch follows the in-curve.
     const zoom = (d: number) => {
       const t = Math.min(1, Math.max(0, Math.log(dCover / d) / Math.log(dCover / LAB3D.minDistance)))
       const out = Math.min(1, Math.max(0, Math.log(d / dCover) / Math.log(dContain / dCover)))
@@ -266,6 +152,27 @@ function CameraRig() {
     const d = camera.position.distanceTo(ctl.target)
     const { t, out, pitch, fog } = lim.zoom(d)
     view.t = t
+    view.out = out
+
+    // Level-triggered tiers: switch when t crosses terrainInT / detailInT (the 3D counterpart of the 2D
+    // map's LVL2/LVL3). Hysteresis: once shown, a tier hides only below (level - tierHysteresis), so a
+    // small wobble around the threshold can't flip it back and forth. Read by Terrain.tsx (the shader mix
+    // + ink bloom) and Pins.tsx (minLevel gating + stamp-in).
+    for (const [key, level] of [["terrain", LAB3D.terrainInT], ["detail", LAB3D.detailInT]] as const) {
+      const want = t >= (shownTier.current[key] ? level - LAB3D.tierHysteresis : level)
+      if (want !== shownTier.current[key]) {
+        shownTier.current[key] = want
+        tier[key] = want
+      }
+    }
+    // the camera's look-at point, in plane UV -- always current (MapControls' own pivot), so no staleness
+    // window is needed the way 2D's discrete pointer-event capture requires one
+    focal.u = ctl.target.x / W + 0.5
+    focal.v = ctl.target.z / H + 0.5
+    // world-space distance from the view's centre to its farthest ground corner, used to size the ink bloom
+    const f = footprint(pitch, d, lim.tan, lim.aspect)
+    view.reach = Math.hypot(f.halfWidth, Math.max(Math.abs(f.far), Math.abs(f.near)))
+
     if (Math.abs(ctl.minPolarAngle - pitch) > 1e-4) {
       ctl.minPolarAngle = ctl.maxPolarAngle = pitch
       ctl.update()
@@ -279,7 +186,6 @@ function CameraRig() {
     let rz = range(lim.z0 + hz, lim.z1 - hz)
     if (out > 0) {
       // ...at contain the land box stays inside the tilted view, with the view's centre over the land
-      const f = footprint(pitch, d, lim.tan, lim.aspect)
       const cx = range(Math.max(lim.x0, lim.x1 - f.halfWidth), Math.min(lim.x1, lim.x0 + f.halfWidth))
       const cz = range(Math.max(lim.z0, lim.z1 - f.near), Math.min(lim.z1, lim.z0 - f.far))
       rx = rx.map((v, i) => v + (cx[i] - v) * out)

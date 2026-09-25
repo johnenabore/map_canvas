@@ -1,16 +1,26 @@
 // Textures for the /lab/3d spike, rendered from the three LOD tiers with sharp (as in scripts/raster.mjs).
+// The scene blends the three tiers in its shader by camera distance (components/lab3d/Terrain.tsx), the
+// 3D counterpart of the 2D map's zoom-triggered LOD reveal (lib/map.ts's LVL2/LVL3, MapContent.tsx).
 // Usage: npm run gen3d -> public/maps/3d/ (+ the preview in lab3d-preview/)
-//   color.webp          base+terrain+detail at 4096px, the title/legend band and the frame replaced by open
+//   color-base.webp      the base tier alone (already opaque everywhere -- split-lod.mjs inpaints an
+//                       underlay so it is) at 4096px, the title/legend band and the frame replaced by open
 //                       sea, land along the old frame edges dissolving into mist (the compass stays); the
 //                       open sea inside gets the sea tile's wave marks, faint, so it isn't flat and empty
+//   color-terrain.webp   the terrain tier alone, 2048px, RGBA (sparse: mountain/forest masses over
+//   color-detail.webp    transparent), alpha multiplied by the same edge-dissolve as the base tier, no sea
+//                       marks; dilated so the scene's bilinear/mip sampling doesn't bleed black at a
+//                       feathered alpha edge. Blended over color-base.webp in the scene's shader.
 //   sea-tile.webp       seamless sea (parchment tone + faint ink wave marks) for the world plane around the
-//                       map; the same tile is painted into color.webp's sea margin on the same grid, so the
-//                       two meet without a seam
+//                       map; the same tile is painted into color-base.webp's sea margin on the same grid,
+//                       so the two meet without a seam
 //   height.png          1024px, 16-bit height in two bytes: R = high byte (on its own the 8-bit height the
 //                       displacement and the pins read), G = low byte (the scene's shader derives normals
 //                       from R+G, so no normal map is needed and 8-bit terracing doesn't ripple the light);
 //                       land plateau 0.15 + relief 0.85, rising from the coast over a smooth ramp; sea and
 //                       removed areas exactly 0
+//   height-detail.png   a second, finer relief pass from the detail tier's coverage alone (fine bumps, not
+//                       the coarse landmass), same 16-bit packing; blended into the displacement and
+//                       normals only once the detail tier is visible
 //   land-bounds.json    bounding box of the land (the flood-fill land mask, where it survives the dissolve),
 //                       in map UV (v down from the top edge) and world units; the scene frames the camera on it
 //   lab3d-preview/preview-height.png   height | hillshaded colour, for judging the relief (git-ignored)
@@ -26,6 +36,7 @@ const WORLD = { w: 903 / 100, h: 672.75 / 100 } // the scene's map plane: MAP.w/
 
 const CFG = {
   colorW: 4096,
+  overlayColorW: 2048, // color-terrain.webp / color-detail.webp: sparse blurred-edge overlays, half res is plenty
   heightW: 1024,
   quality: 85,
   top: 0.14,           // title/legend band, fraction of the map height
@@ -46,6 +57,10 @@ const CFG = {
   waves: 26,           // ink wave marks per tile
   seaMarks: 0.6,       // the tile's wave marks on the open sea inside the map, at this x their opacity (faint)
   marksClear: 5,       // px at 1024: they fade out over this towards anything drawn on the sea (coast, lettering)
+  detailBlur: 3,       // height-detail: a much lighter blur than the coarse pass (fine bumps, not a landmass)
+  detailRelief: 0.5,   // height-detail: amplitude after normalization (kept modest; blended in at a small scale)
+  dilate: 6,           // color-terrain/detail: iterations pushing colour into fully-transparent neighbour
+                        // texels, so bilinear/mip sampling at a feathered alpha edge doesn't bleed toward black
   // the hillshade in the preview mimics the scene's shader normals and lights: LAB3D.displacementScale,
   // LAB3D.reliefExaggeration and LAB3D.sun.position in components/lab3d/Scene.tsx; ambient = the ambient
   // light's share of flat ground's light (LAB3D.ambient.intensity / (that + sun intensity x its height))
@@ -66,6 +81,18 @@ const H = big.info.height
 const small = await sharp(stacked).resize(CFG.heightW).removeAlpha().raw().toBuffer({ resolveWithObject: true })
 const w = small.info.width
 const h = small.info.height
+
+// GPU memory a decoded texture takes once uploaded (browsers decode WebP/PNG to RGBA8 regardless of
+// source compression), x4/3 if mipmapped
+const gpuBytes = (tw, th, mipped) => tw * th * 4 * (mipped ? 4 / 3 : 1)
+let totalDiskBytes = 0
+let totalGpuBytes = 0
+const reportTexture = (name, info, mipped) => {
+  totalDiskBytes += info.size
+  const gpu = gpuBytes(info.width, info.height, mipped)
+  totalGpuBytes += gpu
+  console.log(`${name} ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB on disk, ~${(gpu / 1024 / 1024).toFixed(1)} MiB decoded on GPU`)
+}
 
 // ---------- sea colour: median of the open-sea boxes
 const seaPx = [[], [], []]
@@ -144,9 +171,10 @@ const [tile, tileInk] = await (async () => {
   return [px, ink]
 })()
 await mkdir(outDir, { recursive: true })
-await sharp(Buffer.from(tile.map((v) => Math.max(0, Math.min(255, Math.round(v))))), { raw: { width: T, height: T, channels: 3 } })
+const seaTileInfo = await sharp(Buffer.from(tile.map((v) => Math.max(0, Math.min(255, Math.round(v))))), { raw: { width: T, height: T, channels: 3 } })
   .webp({ quality: 90 })
   .toFile(outDir + "sea-tile.webp")
+reportTexture("sea-tile.webp", seaTileInfo, true)
 
 // ---------- keep/dissolve factor k: 0 in the removed band and frame, rising to 1 over CFG.fade inward
 // (ragged with noise), 1 on the compass. u, t = fractions of the map width/height; distances in widths.
@@ -257,9 +285,49 @@ function chamfer(dist) {
   return dist
 }
 
-// ---------- color.webp: map where k = 1, sea tile (same grid as the world plane) where k = 0, mist between;
+// push valid colour into fully-transparent neighbouring texels (a few iterations, 8-neighbour average of
+// whatever already has colour): a GPU blends RGB and A independently when it mip-filters or bilinearly
+// samples a feathered alpha edge, so a fully-transparent texel's raw (usually black) RGB bleeds into the
+// visible edge as a dark halo; this gives those texels sensible colour without changing their alpha
+function dilate(rgba, w, h, iterations) {
+  let cur = Buffer.from(rgba)
+  for (let iter = 0; iter < iterations; iter++) {
+    const next = Buffer.from(cur)
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4
+        if (cur[i + 3] > 0) continue
+        let r = 0, g = 0, b = 0, n = 0
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const j = (ny * w + nx) * 4
+          if (cur[j + 3] > 0) {
+            r += cur[j]
+            g += cur[j + 1]
+            b += cur[j + 2]
+            n++
+          }
+        }
+        if (n > 0) {
+          next[i] = Math.round(r / n)
+          next[i + 1] = Math.round(g / n)
+          next[i + 2] = Math.round(b / n)
+        }
+      }
+    cur = next
+  }
+  return cur
+}
+
+// ---------- color-base.webp: the base tier alone (already opaque everywhere, see split-lod.mjs's
+// inpainted underlay), map where k = 1, sea tile (same grid as the world plane) where k = 0, mist between;
 // on the open sea inside, the tile's wave marks at CFG.seaMarks x their opacity, fading out over
-// CFG.marksClear towards anything that isn't open sea (so they never touch a coast or a letter)
+// CFG.marksClear towards anything that isn't open sea (so they never touch a coast or a letter). Terrain
+// and detail are painted separately (color-terrain.webp / color-detail.webp, below) and blended in the
+// scene's shader, so only the base tier gets the sea treatment here.
+const baseFlat = await sharp(tiers[0]).removeAlpha().raw().toBuffer()
 {
   const clear = Float32Array.from(chamfer(Float32Array.from(openSea, (s) => (s ? 1e9 : 0))), (v) => smooth(v / 3 / CFG.marksClear))
   const marksAt = (u, t) => { // bilinear, u and t fractions of the map
@@ -288,13 +356,37 @@ function chamfer(dist) {
       const a = ink && k > 0 ? (ink / 255) * CFG.seaMarks * marksAt(u, t) : 0
       const mist = CFG.mist * 4 * k * (1 - k) * (0.65 + 0.35 * mistNoise(u, t))
       for (let c = 0; c < 3; c++) {
-        const v = tile[tp * 3 + c] * (1 - k) + (big.data[i + c] * (1 - a) + INK[c] * a) * k
+        const v = tile[tp * 3 + c] * (1 - k) + (baseFlat[i + c] * (1 - a) + INK[c] * a) * k
         out[i + c] = Math.max(0, Math.min(255, Math.round(v + (255 - v) * mist * 0.5)))
       }
     }
   }
-  const info = await sharp(out, { raw: { width: W, height: H, channels: 3 } }).webp({ quality: CFG.quality }).toFile(outDir + "color.webp")
-  console.log(`color.webp ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB`)
+  const info = await sharp(out, { raw: { width: W, height: H, channels: 3 } }).webp({ quality: CFG.quality }).toFile(outDir + "color-base.webp")
+  reportTexture("color-base.webp", info, true)
+}
+
+// ---------- color-terrain.webp / color-detail.webp: the terrain/detail tiers rendered alone (sparse,
+// mostly transparent), alpha multiplied by the same edge-dissolve k, dilated so a feathered alpha edge
+// doesn't bleed dark RGB when sampled, at CFG.overlayColorW (half of colorW: sparse blurred-edge overlays
+// don't need the base tier's crisp resolution). No sea-wave-marks (base tier only).
+for (const [name, tierIdx] of [["color-terrain.webp", 1], ["color-detail.webp", 2]]) {
+  const ow = CFG.overlayColorW
+  const oh = Math.round((ow * H) / W)
+  const { data } = await sharp(tiers[tierIdx]).resize(ow, oh).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  const px = Buffer.from(data)
+  for (let y = 0; y < oh; y++) {
+    const t = y / (oh - 1)
+    for (let x = 0; x < ow; x++) {
+      const u = x / (ow - 1)
+      const i = (y * ow + x) * 4
+      px[i + 3] = Math.round(px[i + 3] * keep(u, t))
+    }
+  }
+  const dilated = dilate(px, ow, oh, CFG.dilate)
+  const info = await sharp(dilated, { raw: { width: ow, height: oh, channels: 4 } })
+    .webp({ quality: CFG.quality, alphaQuality: 100 })
+    .toFile(outDir + name)
+  reportTexture(name, info, false)
 }
 
 // ---------- height: relief from the terrain+detail coverage (blurred in float), on a land plateau that rises
@@ -358,7 +450,46 @@ for (let y = 0; y < h; y++)
     out[p * 3] = out[p * 3 + 2] = v >> 8
     out[p * 3 + 1] = v & 255
   }
-  await sharp(out, { raw: { width: w, height: h, channels: 3 } }).png({ compressionLevel: 9, adaptiveFiltering: true }).toFile(outDir + "height.png")
+  const info = await sharp(out, { raw: { width: w, height: h, channels: 3 } }).png({ compressionLevel: 9, adaptiveFiltering: true }).toFile(outDir + "height.png")
+  reportTexture("height.png", info, false)
+}
+
+// ---------- height-detail.png: a second, finer relief pass from the detail tier's alpha coverage ALONE
+// (not terrain+detail combined) -- the fine bumps roads/hedgerows/individual trees would add, not the
+// coarse landmass shape, so a much lighter blur than the main pass and no coast/relief ramp (each shape's
+// own edge already gives it a natural falloff). Same sea/frame masking, same 16-bit R+G packing as
+// height.png, so the scene's shader can decode and blend it the same way.
+let detailLo = 0
+let detailPeak = 1
+const heightDetail = new Float32Array(N)
+{
+  const detailTier = await render(svgs[2], CFG.heightW)
+  const detailAlpha = await sharp(detailTier).extractChannel(3).raw().toBuffer()
+  if (detailAlpha.length !== N) throw new Error(`expected ${N} px, got ${detailAlpha.length}`)
+  const detailCoverage = gaussian(Float32Array.from(detailAlpha, (a) => a / 255), CFG.detailBlur).map(srgbEncode)
+  // half the land typically has ~no detail-tier shapes at all, so the baseline is the median, not the 5th
+  // percentile (which would just be 0 and normalize noise into visible bumps everywhere)
+  const onLandDetail = Array.from(detailCoverage).filter((_, p) => !isSea[p]).sort((a, b) => a - b)
+  detailLo = onLandDetail[Math.floor(onLandDetail.length * 0.5)]
+  detailPeak = Math.max(detailLo + 1e-3, onLandDetail[Math.floor(onLandDetail.length * 0.995)])
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x
+      if (isSea[p]) continue
+      const u = x / (w - 1)
+      const t = y / (h - 1)
+      const relief = Math.max(0, Math.min(1, (detailCoverage[p] - detailLo) / (detailPeak - detailLo))) * CFG.detailRelief
+      const k = keep(u, t) * (1 - compassK(u, t))
+      heightDetail[p] = Math.min(1, relief * k)
+    }
+  const out = Buffer.alloc(N * 3)
+  for (let p = 0; p < N; p++) {
+    const v = Math.round(heightDetail[p] * 65535)
+    out[p * 3] = out[p * 3 + 2] = v >> 8
+    out[p * 3 + 1] = v & 255
+  }
+  const info = await sharp(out, { raw: { width: w, height: h, channels: 3 } }).png({ compressionLevel: 9, adaptiveFiltering: true }).toFile(outDir + "height-detail.png")
+  reportTexture("height-detail.png", info, false)
 }
 
 // ---------- land-bounds.json: where the land is, as the viewer sees it (the land mask where the dissolve
@@ -400,7 +531,16 @@ await writeFile(outDir + "land-bounds.json", JSON.stringify(bounds, null, 2) + "
     return P.sun.map((c) => c / m)
   })()
   const hAt = (x, y) => height[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))]
-  const colorSmall = await sharp(outDir + "color.webp").resize(w, h).removeAlpha().raw().toBuffer()
+  // flatten the three tiers back together at preview resolution, so the preview still shows full richness
+  const colorSmall = await sharp(outDir + "color-base.webp")
+    .resize(w, h)
+    .composite([
+      { input: await sharp(outDir + "color-terrain.webp").resize(w, h).toBuffer() },
+      { input: await sharp(outDir + "color-detail.webp").resize(w, h).toBuffer() },
+    ])
+    .removeAlpha()
+    .raw()
+    .toBuffer()
   const out = Buffer.alloc(w * 2 * h * 3)
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
@@ -426,5 +566,7 @@ for (const v of height) {
   sum += v
 }
 console.log(`height.png ${w}x${h} (16-bit in R+G): land coverage p5..p99.5 ${lo.toFixed(3)}..${peak.toFixed(3)}, max height ${maxH.toFixed(2)}, mean ${(sum / N).toFixed(3)}`)
+console.log(`height-detail.png ${w}x${h} (16-bit in R+G): land coverage median..p99.5 ${detailLo.toFixed(3)}..${detailPeak.toFixed(3)}`)
 console.log(`land bounds: uv u ${bounds.uv.u0}..${bounds.uv.u1}, v ${bounds.uv.v0}..${bounds.uv.v1} | world x ${bounds.world.x0}..${bounds.world.x1}, z ${bounds.world.z0}..${bounds.world.z1}`)
-console.log("wrote public/maps/3d/: color.webp, sea-tile.webp, height.png, land-bounds.json; lab3d-preview/preview-height.png")
+console.log(`texture memory total: ${(totalDiskBytes / 1024 / 1024).toFixed(1)} MiB on disk, ~${(totalGpuBytes / 1024 / 1024).toFixed(1)} MiB decoded on GPU (this scene's textures only; clouds/atmos textures are separate)`)
+console.log("wrote public/maps/3d/: color-base.webp, color-terrain.webp, color-detail.webp, sea-tile.webp, height.png, height-detail.png, land-bounds.json; lab3d-preview/preview-height.png")
