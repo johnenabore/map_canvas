@@ -64,18 +64,85 @@ export const AMBIENT = {
   flicker: 0.35,                // candle flicker: the vignette's shadows ease back by up to ~35% as the flame flares
 } as const
 
+export type POIKind = "region" | "city" | "landmark"
+
 export type POI = {
   id: string
   name: string
-  blurb: string
-  x: number        // % from left of map
-  y: number        // % from top
-  minLevel: 1 | 2 | 3
+  kind: POIKind
+  blurb: string          // one line, shown in the sheet's peek state
+  lore: string           // short paragraph
+  chapters: string[]     // chapter titles set here
+  characters?: string[]
+  x: number              // % from left of map
+  y: number              // % from top
+  minLevel: 1 | 2 | 3    // zoom level at which the pin appears (LVL2 / LVL3)
   storyId: string
 }
 
+// placeholder content until the real lore is written
 export const POIS: POI[] = [
-  { id: "capital", name: "Aldhollow", blurb: "Seat of the old crown.", x: 42, y: 37, minLevel: 1, storyId: "ch1" },
-  { id: "pass", name: "Greyfang Pass", blurb: "Where the caravan vanished.", x: 61, y: 22, minLevel: 2, storyId: "ch2" },
-  { id: "well", name: "Hollow Well", blurb: "Something hums below.", x: 30, y: 64, minLevel: 3, storyId: "ch3" },
+  {
+    id: "capital",
+    name: "Aldhollow",
+    kind: "city",
+    blurb: "Seat of the old crown.",
+    lore:
+      "Aldhollow was raised inside the husk of a fallen mountain, its streets cut in rings around an empty throne. " +
+      "The crown has been missing for forty winters, and the Council of Thirteen rules in its name, arguing over " +
+      "whose turn it is to sit beside the chair nobody sits in.",
+    chapters: ["The Empty Throne", "Ashes in the Lower Ring", "A Council of Thirteen"],
+    characters: ["Maren Vell, keeper of the throne room", "Old Tobin, the lamplighter", "Captain Idris Hale"],
+    x: 42,
+    y: 37,
+    minLevel: 1,
+    storyId: "ch1",
+  },
+  {
+    id: "pass",
+    name: "Greyfang Pass",
+    kind: "landmark",
+    blurb: "Where the caravan vanished.",
+    lore:
+      "The only road north runs between two broken peaks the shepherds call the Fangs. Last autumn a salt caravan of " +
+      "thirty wagons went up into the fog and never came down the other side. The snow has kept the wheel ruts, " +
+      "and they stop in the middle of the road.",
+    chapters: ["Tracks in the Snow", "The Thirty Wagons"],
+    characters: ["Sella of the Salt Road", "The guide with no name"],
+    x: 61,
+    y: 22,
+    minLevel: 2,
+    storyId: "ch2",
+  },
+  {
+    id: "well",
+    name: "Hollow Well",
+    kind: "landmark",
+    blurb: "Something hums below.",
+    lore:
+      "An old stone well at the edge of a village that no longer exists. Drop a pebble and you never hear it land. " +
+      "On still nights the well hums a single low note, and the dogs of the nearby farms refuse to sleep.",
+    chapters: ["The Humming", "What the Rope Brought Up"],
+    x: 30,
+    y: 64,
+    minLevel: 3,
+    storyId: "ch3",
+  },
 ]
+
+// focus mode: what happens when a location is opened
+export const FOCUS = {
+  zoom: { region: 1.8, city: 3, landmark: 4 } as Record<POIKind, number>, // target scale per kind (never zooms out)
+  flyMs: 900,             // camera flight to a location
+  spotlight: 0.45,        // darkness around the focused location
+  spotlightRadius: 0.22,  // clear area around it, x the smaller viewport side
+}
+
+// location sheet (phones) / side panel (desktop); camera framing uses these too
+export const SHEET = {
+  peekPx: 148,            // peek height: name + kind + one line
+  half: 0.5,              // half snap, fraction of the viewport height (the camera frames above it)
+  full: 0.92,             // full snap
+  panelPx: 380,           // desktop side panel width
+  desktopQuery: "(min-width: 1024px) and (pointer: fine)",
+} as const

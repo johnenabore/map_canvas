@@ -2,7 +2,7 @@
 import { useRef, type RefObject } from "react"
 import { useTransformInit } from "react-zoom-pan-pinch"
 import { INTRO, POIS } from "@/lib/map"
-import { clampToBounds } from "./SmoothWheel"
+import { flyTo, type Flight } from "./camera"
 
 const SEEN_KEY = "protheka-intro-seen"
 const MAP_FADE_MS = 300 // MapContent's base-map fade-in (duration-300) — wait for it before the hold
@@ -23,8 +23,6 @@ export const createIntroLink = (): IntroLink => ({
   playing: false,
 })
 
-const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
-
 function shouldPlay() {
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false
   try {
@@ -37,9 +35,9 @@ function shouldPlay() {
 }
 
 // "Arrive through the clouds": dense clouds + dark veil over the warmed-up map, a short hold, then
-// clouds rush outward, the veil lifts and the camera settles on INTRO.targetPoi. One rAF loop writes
-// the camera (instance.setState, clamped every frame), the veil opacity and the clouds' cover value;
-// it stops when done. Any pointerdown/wheel/keydown jumps straight to the end state.
+// clouds rush outward, the veil lifts and the camera settles on INTRO.targetPoi. The camera is the
+// shared flyTo (clamped every frame); its onFrame drives the veil opacity and the clouds' cover value.
+// Any pointerdown/wheel/keydown jumps straight to the end state.
 // Render only when atmosphere is on and there's no ?poi= deep link (MapShell decides).
 export default function Intro({ introRef }: { introRef: RefObject<IntroLink> }) {
   const veilRef = useRef<HTMLDivElement>(null)
@@ -47,20 +45,10 @@ export default function Intro({ introRef }: { introRef: RefObject<IntroLink> }) 
   useTransformInit(({ instance }) => {
     const link = introRef.current
     const veil = veilRef.current
-    const wrapper = instance.wrapperComponent
-    const content = instance.contentComponent
-    if (!veil || !wrapper || !content || !shouldPlay()) return
+    if (!veil || !instance.wrapperComponent || !instance.contentComponent || !shouldPlay()) return
 
     const poi = POIS.find((p) => p.id === INTRO.targetPoi) ?? POIS[0]
-    // targetScale with the POI at the viewport centre, clamped exactly like SmoothWheel/the library bounds
-    const endState = () => {
-      const s = INTRO.targetScale
-      const x = wrapper.clientWidth / 2 - (poi.x / 100) * content.offsetWidth * s
-      const y = wrapper.clientHeight / 2 - (poi.y / 100) * content.offsetHeight * s
-      return { s, ...clampToBounds(instance, s, x, y) }
-    }
-
-    let raf = 0
+    let flight: Flight | null = null
     let timer = 0
     let done = false
     let lastVeil = ""
@@ -74,7 +62,7 @@ export default function Intro({ introRef }: { introRef: RefObject<IntroLink> }) 
     const stop = () => {
       done = true
       link.playing = false
-      cancelAnimationFrame(raf)
+      flight?.cancel()
       clearTimeout(timer)
       link.onReady = () => {}
       window.removeEventListener("pointerdown", skip, true)
@@ -87,38 +75,35 @@ export default function Intro({ introRef }: { introRef: RefObject<IntroLink> }) 
       link.redraw()
       veil.style.display = "none" // never shown again: drop its layer
     }
+    // the flight's per-frame hook: runs before each camera write, so Clouds picks up the new cover in
+    // the onChange that setState fires
+    const onFrame = (e: number) => {
+      link.cover = 1 - e
+      const v = (1 - e).toFixed(3)
+      if (v !== lastVeil) {
+        veil.style.opacity = v
+        lastVeil = v
+      }
+    }
+    // the intro flight doesn't cancel on input: the skip below finishes it instead
+    const fly = (ms: number) =>
+      flyTo(instance, poi.x, poi.y, INTRO.targetScale, ms, { onFrame, cancelOnInput: false })
+
     // input during the intro: jump to the end state and hand over. Capture phase on window runs
     // before the library's mousedown/touchstart and SmoothWheel's wheel handler, so their gestures
     // start from the final transform and nothing is left animating against them.
     function skip() {
       if (done) return
-      const end = endState()
-      link.cover = 0
-      instance.setState(end.s, end.x, end.y)
+      if (flight) flight.finish()
+      else fly(0) // not started yet: jump to the end state
       finish()
     }
 
     const run = () => {
-      const from = { s: instance.state.scale, x: instance.state.positionX, y: instance.state.positionY }
-      const to = endState()
-      const t0 = performance.now()
-      const tick = (now: number) => {
-        if (done) return
-        const t = Math.min(1, (now - t0) / INTRO.durationMs)
-        const e = easeInOutCubic(t)
-        const s = from.s + (to.s - from.s) * e
-        const p = clampToBounds(instance, s, from.x + (to.x - from.x) * e, from.y + (to.y - from.y) * e)
-        link.cover = 1 - e // Clouds picks this up in the onChange fired by setState below
-        const v = (1 - e).toFixed(3)
-        if (v !== lastVeil) {
-          veil.style.opacity = v
-          lastVeil = v
-        }
-        instance.setState(s, p.x, p.y)
-        if (t < 1) raf = requestAnimationFrame(tick)
-        else finish()
-      }
-      raf = requestAnimationFrame(tick)
+      flight = fly(INTRO.durationMs)
+      flight.done.then((result) => {
+        if (result === "done") finish()
+      })
     }
 
     const begin = () => {

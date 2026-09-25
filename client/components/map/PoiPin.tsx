@@ -1,8 +1,7 @@
 "use client"
 import { useRef } from "react"
-import { KeepScale, useControls } from "react-zoom-pan-pinch"
+import { KeepScale } from "react-zoom-pan-pinch"
 import type { POI } from "@/lib/map"
-import { useReducedMotion } from "@/lib/useReducedMotion"
 
 // wax-seal rim: a circle with 14 soft scallops, built once at module load (viewBox units)
 const SEAL_RIM = (() => {
@@ -38,36 +37,57 @@ function SealMarker() {
   )
 }
 
-export default function PoiPin({ poi, onSelect }: { poi: POI; onSelect: (p: POI) => void }) {
+// A location pin. Taps are reported to MapShell (which flies the camera and opens the sheet) with the
+// pin's screen point for the ink ripple. Focus mode: data-selected scales the seal up from its tip and
+// fades in a warm glow behind it; the other pins dim (CSS, see globals.css).
+export default function PoiPin({
+  poi,
+  selected,
+  onTap,
+}: {
+  poi: POI
+  selected: boolean
+  onTap: (p: POI, at: { x: number; y: number }) => void
+}) {
   const start = useRef<{ x: number; y: number } | null>(null)
   const el = useRef<HTMLDivElement>(null)
-  const { zoomToElement } = useControls()
-  const reduced = useReducedMotion()
 
   return (
     <div
       ref={el}
       id={`poi-${poi.id}`}
       data-min={poi.minLevel}
+      data-selected={selected || undefined}
       className="poi absolute h-0 w-0"
       style={{ left: `${poi.x}%`, top: `${poi.y}%` }}
     >
       <KeepScale>
         <button
           aria-label={poi.name}
+          aria-haspopup="dialog"
+          aria-expanded={selected}
           onPointerDown={(e) => (start.current = { x: e.clientX, y: e.clientY })}
           onClick={(e) => {
             const s = start.current
-            // finger moved = it was a drag, not a tap
-            if (s && Math.hypot(e.clientX - s.x, e.clientY - s.y) > 8) return
-            if (!el.current) return onSelect(poi)
-            // fly to the pin, then open the sheet (promise resolves when the animation ends)
-            zoomToElement(el.current, 3.5, reduced ? 0 : 500).then(() => onSelect(poi))
+            start.current = null
+            // finger moved = it was a drag, not a tap (keyboard clicks have detail 0 and no pointer)
+            if (e.detail !== 0 && s && Math.hypot(e.clientX - s.x, e.clientY - s.y) > 8) return
+            navigator.vibrate?.(10)
+            // the .poi anchor is a 0x0 box on the map point, i.e. the tip of the seal
+            const r = el.current?.getBoundingClientRect()
+            onTap(poi, r ? { x: r.left, y: r.top } : { x: e.clientX, y: e.clientY })
           }}
           // 44px tap target; press = slight squash toward the tip + brighter wax (no squash under reduced motion)
-          className="absolute left-0 top-0 grid h-11 w-11 -translate-x-1/2 -translate-y-full origin-bottom place-items-end justify-items-center transition-[scale,filter] duration-100 ease-out active:scale-90 active:brightness-125 motion-reduce:transition-none motion-reduce:active:scale-100"
+          className="poi-pin absolute left-0 top-0 grid h-11 w-11 -translate-x-1/2 -translate-y-full origin-bottom place-items-end justify-items-center transition-[scale,filter] duration-100 ease-out active:scale-90 active:brightness-125 motion-reduce:transition-none motion-reduce:active:scale-100"
         >
-          <SealMarker />
+          <span className="poi-glow" aria-hidden />
+          <span className="poi-seal">
+            <SealMarker />
+          </span>
+          {/* desktop hover tooltip (CSS: fine pointers only) */}
+          <span className="poi-tip" aria-hidden>
+            {poi.name}
+          </span>
         </button>
       </KeepScale>
     </div>

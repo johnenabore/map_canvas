@@ -8,7 +8,73 @@
 .map .poi { transition: opacity .25s; }
 /* KeepScale's wrapper div rewrites its transform every zoom frame; give it its
    own GPU layer so that doesn't repaint the map layer underneath */
-.map .poi > div { will-change: transform; }
+.map .poi > div { will-change: transform; transition: opacity .3s; }
+
+/* ---- location focus (PoiPin.tsx, Spotlight.tsx, PoiSheet.tsx, MapShell.tsx) ---- */
+
+/* other pins dim while one is open: on the KeepScale wrapper, so it multiplies with the
+   hide-by-level opacity on .poi instead of overriding it */
+.map[data-focus] .poi:not([data-selected]) > div { opacity: .4; }
+.poi-pin { cursor: pointer; }
+.poi-pin:focus-visible { outline: 2px solid #f4efcf; outline-offset: 2px; border-radius: 6px; }
+.poi-seal { display: block; transform-origin: 50% 100%; transition: scale .25s ease-out; }
+.poi[data-selected] .poi-seal { scale: 1.15; } /* grows from its tip, so it stays on the point */
+.poi-glow { /* soft warm glow behind the selected seal (seal centre = 50% / 34% of the 44px button) */
+  position: absolute; left: 50%; top: 34%; width: 64px; height: 64px; translate: -50% -50%;
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(255,214,150,.8) 0%, rgba(255,214,150,0) 70%);
+  opacity: 0; transition: opacity .3s;
+}
+.poi[data-selected] .poi-glow { opacity: 1; }
+.poi-tip { /* parchment tooltip, fine pointers only (below) */
+  position: absolute; bottom: calc(100% + 4px); left: 50%; translate: -50% 0;
+  white-space: nowrap; padding: 2px 8px; border-radius: 4px; pointer-events: none;
+  background: #f4efcf; color: #3f1d0e; border: 1px solid #9b8066;
+  font-size: 13px; font-weight: 600; line-height: 1.4;
+  box-shadow: 0 2px 6px rgba(63,29,14,.25);
+  opacity: 0; transition: opacity .15s;
+}
+@media (hover: hover) and (pointer: fine) {
+  .poi-pin:hover .poi-tip { opacity: 1; }
+}
+
+/* ink ripple from a tapped pin: screen space, transform + opacity only, removed on animationend */
+.poi-ripple {
+  position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px;
+  border-radius: 50%; border: 2px solid rgba(63,29,14,.7);
+  box-shadow: inset 0 0 0 1px rgba(63,29,14,.25);
+  will-change: transform, opacity;
+  animation: poi-ripple .6s ease-out forwards;
+}
+@keyframes poi-ripple { from { transform: scale(.2); opacity: .9; } to { transform: scale(1.6); opacity: 0; } }
+
+/* spotlight around the open location: promoted, only its transform (JS) and opacity change */
+.focus-spotlight {
+  position: absolute; left: 0; top: 0; pointer-events: none;
+  will-change: transform, opacity;
+  opacity: 0; transition: opacity .4s ease-out;
+}
+.focus-spotlight[data-on] { opacity: 1; }
+
+/* location sheet: phones = bottom sheet (translateY written by JS), desktop = right side panel */
+.poi-sheet {
+  position: fixed; z-index: 20; left: 0; right: 0; bottom: 0;
+  display: flex; flex-direction: column;
+  background: #f4efcf; color: #3f1d0e;
+  border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(20,8,2,.35);
+  transform: translate3d(0, 100%, 0); /* hidden until JS positions it */
+  will-change: transform;
+}
+.poi-sheet-head { flex: none; touch-action: none; } /* always drags the sheet */
+.poi-sheet-body { flex: 1; min-height: 0; overflow: hidden; touch-action: none; overscroll-behavior: contain; }
+.poi-sheet[data-snap="full"] .poi-sheet-body { overflow-y: auto; touch-action: pan-y; } /* scrolls at full */
+.poi-sheet[data-desktop] {
+  top: 0; left: auto; border-radius: 0; box-shadow: -8px 0 30px rgba(20,8,2,.3);
+  transform: translate3d(100%, 0, 0); transition: transform .3s ease-out;
+}
+.poi-sheet[data-desktop][data-open] { transform: translate3d(0, 0, 0); }
+.poi-sheet[data-desktop] .poi-sheet-head { touch-action: auto; padding-top: 1.25rem; }
+.poi-sheet[data-desktop] .poi-sheet-body { overflow-y: auto; touch-action: pan-y; }
 
 /* hide pins until their zoom level is reached */
 .map[data-lvl="1"] .poi[data-min="2"],
@@ -176,4 +242,7 @@
   .map .atmos-wisp:first-child { opacity: 0.8; transform: translate3d(8%, -8%, 0) scale(0.85); } /* one still wisp */
   .map .atmos-birds { display: none; }
   .map-shell .atmos-flicker { animation: none; }
+  /* location focus: instant state changes, no ripple (MapShell doesn't create one either) */
+  .map .poi > div, .poi-seal, .poi-glow, .poi-tip, .focus-spotlight, .poi-sheet[data-desktop] { transition: none; }
+  .poi-ripple { display: none; }
 }

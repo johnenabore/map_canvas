@@ -8,11 +8,18 @@ import Birds from "./Birds"
 import type { IntroLink } from "./Intro"
 
 export default function MapContent({
-  onSelect,
+  onPinTap,
+  selectedId,
   atmos,
   onReady,
   introRef,
-}: { onSelect: (p: POI) => void; atmos: boolean; onReady?: () => void; introRef: RefObject<IntroLink> }) {
+}: {
+  onPinTap: (p: POI, at: { x: number; y: number }) => void
+  selectedId: string | null // focus mode: data-focus on .map dims the other pins
+  atmos: boolean
+  onReady?: () => void
+  introRef: RefObject<IntroLink>
+}) {
   const ref = useRef<HTMLDivElement>(null)
   const last = useRef({ z: 0, lvl: "1" })
   const idle = useRef<number | undefined>(undefined)
@@ -92,6 +99,7 @@ export default function MapContent({
     <div
       ref={ref}
       data-lvl="1"
+      data-focus={selectedId ?? undefined}
       className="map relative"
       style={{
         height: "100dvh",
@@ -113,7 +121,9 @@ export default function MapContent({
       {atmos && <MapSpaceAtmos />}
       {atmos && <Birds introRef={introRef} />}
 
-      {POIS.map((p) => <PoiPin key={p.id} poi={p} onSelect={onSelect} />)}
+      {POIS.map((p) => (
+        <PoiPin key={p.id} poi={p} selected={p.id === selectedId} onTap={onPinTap} />
+      ))}
     </div>
   )
 }
