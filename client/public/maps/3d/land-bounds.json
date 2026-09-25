@@ -1,0 +1,15 @@
+{
+  "note": "land bounding box. uv: fractions of the map, v down from the top edge. world: the scene's map plane, centred on the origin, x right, z south (down the map).",
+  "uv": {
+    "u0": 0.0391,
+    "u1": 0.96,
+    "v0": 0.152,
+    "v1": 0.9594
+  },
+  "world": {
+    "x0": -4.1619,
+    "x1": 4.1538,
+    "z0": -2.3412,
+    "z1": 3.0906
+  }
+}

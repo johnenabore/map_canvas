@@ -15,7 +15,11 @@ function sampler(image: CanvasImageSource & { width: number; height: number }) {
   const ctx = c.getContext("2d", { willReadFrequently: true })!
   ctx.drawImage(image, 0, 0)
   const { data, width, height } = ctx.getImageData(0, 0, c.width, c.height)
-  const px = (x: number, y: number) => data[(Math.min(height - 1, y) * width + Math.min(width - 1, x)) * 4] / 255
+  // 16-bit height: R = high byte, G = low byte
+  const px = (x: number, y: number) => {
+    const i = (Math.min(height - 1, y) * width + Math.min(width - 1, x)) * 4
+    return (data[i] * 256 + data[i + 1]) / 65535
+  }
   return (u: number, v: number) => {
     const x = u * (width - 1)
     const y = v * (height - 1)
