@@ -4,6 +4,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { MapControls, useTexture } from "@react-three/drei"
 import * as THREE from "three"
 import { MAP } from "@/lib/map"
+import LAND from "@/public/maps/3d/land-bounds.json" // npm run gen3d
 import Pins from "./Pins"
 
 // ---- every tunable of the spike (world units: the map is MAP.w/100 x MAP.h/100 = 9.03 x 6.73) ----
@@ -11,14 +12,14 @@ export const LAB3D = {
   map: { w: MAP.w / 100, h: MAP.h / 100 },
   segments: [512, 382] as const,
   displacementScale: 0.12,   // world units at height 1.0; subtle, so lettering on the land doesn't warp
-  normalScale: 1,            // on top of the slope exaggeration baked into normal.png (gen-3d normalStrength)
+  reliefExaggeration: 3.5,   // shading slopes x this (normals come from the heightmap in the shader; the
+                             // geometry keeps displacementScale). gen-3d's preview mirrors it.
   world: 3,                  // world sea plane: square, this x the map width
   seaTilesAcrossMap: 8,      // sea-tile.webp repeats: must match gen-3d (4096px map / 512px tile)
   worldFade: [0.62, 0.98],   // world plane: opaque out to this fraction of its half-size, gone at the second (radial)
   fov: 40,
-  continents: { x0: 0.03, x1: 0.97, y0: 0.14, y1: 0.97 }, // fractions of the map: all of it fits at max zoom-out
-  fitMargin: 1.04,
-  panMargin: 0.08,           // may pan this far (x the map width) past the outermost continents
+  // framing: the land's bounding box (public/maps/3d/land-bounds.json) covers the screen at max zoom-out,
+  // and panning stops where the view would leave it
   minDistance: 1.1,          // max zoom-in
   pitch: [0.05, 0.85] as const, // rad from straight down: fully zoomed out -> fully zoomed in
   fog: [1.6, 3.2] as const,  // fog near/far, x the camera distance (tilted views fade into the background)
@@ -47,7 +48,7 @@ const smoothstep = (a: number, b: number, v: number) => {
   return x * x * (3 - 2 * x)
 }
 
-// colour textures in sRGB; data textures (height, normal) stay linear
+// colour textures in sRGB; the heightmap stays linear
 const srgb = (tex: THREE.Texture | THREE.Texture[]) => {
   for (const t of Array.isArray(tex) ? tex : [tex]) {
     if (t.colorSpace === THREE.SRGBColorSpace) continue
@@ -57,9 +58,43 @@ const srgb = (tex: THREE.Texture | THREE.Texture[]) => {
   }
 }
 
+// Normals from the heightmap in the fragment shader, so there's no normal map: central differences of the
+// 16-bit height (R = high byte, G = low byte), a texel apart (a screen pixel apart when zoomed out, via
+// fwidth), as the normal of the flat-lying plane (u = +x, v = north = -z), then into view space.
+function reliefNormals(heightMap: THREE.Texture) {
+  const img = heightMap.image as { width: number; height: number }
+  const slope = (LAB3D.displacementScale / (2 * (W / img.width))) * LAB3D.reliefExaggeration
+  return (shader: THREE.WebGLProgramParametersWithUniforms) => {
+    shader.uniforms.reliefMap = { value: heightMap }
+    shader.uniforms.reliefTexel = { value: new THREE.Vector2(1 / img.width, 1 / img.height) }
+    shader.uniforms.reliefSlope = { value: slope }
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+uniform sampler2D reliefMap;
+uniform vec2 reliefTexel;
+uniform float reliefSlope;
+float reliefAt(vec2 uv) { vec4 t = texture2D(reliefMap, uv); return t.r * 0.996109 + t.g * 0.003891; }`,
+      )
+      .replace(
+        "#include <normal_fragment_maps>",
+        `vec2 reliefStep = max(reliefTexel, fwidth(vMapUv));
+vec2 reliefK = reliefSlope * reliefTexel / reliefStep;
+float reliefL = reliefAt(vMapUv - vec2(reliefStep.x, 0.0));
+float reliefR = reliefAt(vMapUv + vec2(reliefStep.x, 0.0));
+float reliefD = reliefAt(vMapUv - vec2(0.0, reliefStep.y));
+float reliefU = reliefAt(vMapUv + vec2(0.0, reliefStep.y));
+vec3 reliefN = normalize(vec3((reliefL - reliefR) * reliefK.x, 1.0, (reliefU - reliefD) * reliefK.y));
+normal = normalize((viewMatrix * vec4(reliefN, 0.0)).xyz);`,
+      )
+  }
+}
+
 function Terrain() {
   const color = useTexture("/maps/3d/color.webp", srgb)
-  const [height, normal] = useTexture(["/maps/3d/height.png", "/maps/3d/normal.png"])
+  const height = useTexture("/maps/3d/height.png")
+  const onBeforeCompile = useMemo(() => reliefNormals(height), [height])
   return (
     <>
       <mesh rotation-x={-Math.PI / 2}>
@@ -68,8 +103,7 @@ function Terrain() {
           map={color}
           displacementMap={height}
           displacementScale={LAB3D.displacementScale}
-          normalMap={normal}
-          normalScale={[LAB3D.normalScale, LAB3D.normalScale]}
+          onBeforeCompile={onBeforeCompile}
           roughness={1}
           metalness={0}
         />
@@ -139,9 +173,10 @@ function Clouds() {
   )
 }
 
-// MapControls without rotation. Max zoom-out fits every continent (portrait or landscape); the pitch
-// follows the zoom (straight down when out, tilted when in); the target is clamped so you can pan a little
-// past the outermost continents but never towards the edge of the world plane; fog scales with distance.
+// MapControls without rotation. Max zoom-out covers the screen with the land's bounding box (the tighter
+// axis fits, the other overflows and pans), recomputed on resize/rotation; the pitch follows the zoom
+// (straight down when out, tilted when in); panning stops where the top-down view would leave the land box
+// (tilted views may still see sea towards the horizon); fog scales with distance.
 function CameraRig() {
   const controls = useRef<ComponentRef<typeof MapControls>>(null)
   const camera = useThree((s) => s.camera)
@@ -149,28 +184,26 @@ function CameraRig() {
   const scene = useThree((s) => s.scene)
   const invalidate = useThree((s) => s.invalidate)
   const placed = useRef(false)
-  const c = LAB3D.continents
   const lim = useMemo(() => {
     const tan = Math.tan(((LAB3D.fov / 2) * Math.PI) / 180)
     const aspect = size.width / Math.max(1, size.height)
-    const cw = (c.x1 - c.x0) * W * LAB3D.fitMargin
-    const ch = (c.y1 - c.y0) * H * LAB3D.fitMargin
-    return {
-      cx: ((c.x0 + c.x1) / 2 - 0.5) * W,
-      cz: ((c.y0 + c.y1) / 2 - 0.5) * H,
-      halfW: cw / 2,
-      halfH: ch / 2,
-      tan,
-      aspect,
-      dMax: Math.max(ch / (2 * tan), cw / (2 * tan * aspect)),
-    }
-  }, [size.width, size.height, c.x0, c.x1, c.y0, c.y1])
+    const { x0, x1, z0, z1 } = LAND.world
+    // cover: the view (top-down, 2 d tan x 2 d tan aspect) fits inside the land box on both axes
+    const dMax = Math.min((z1 - z0) / (2 * tan), (x1 - x0) / (2 * tan * aspect))
+    return { x0, x1, z0, z1, cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, tan, aspect, dMax: Math.max(LAB3D.minDistance * 1.5, dMax) }
+  }, [size.width, size.height])
 
   useLayoutEffect(() => {
     const ctl = controls.current
-    if (!ctl || placed.current) return
+    if (!ctl) return
+    if (placed.current) {
+      // resized / rotated: maxDistance has the new cover distance; update() pulls the camera in if needed
+      ctl.update()
+      invalidate()
+      return
+    }
     placed.current = true
-    // start fully zoomed out on the continents (?zoom=0..1 and ?at=x,y in map % pick another start)
+    // start fully zoomed out, centred on the land (?zoom=0..1 and ?at=x,y in map % pick another start)
     const q = new URLSearchParams(window.location.search)
     const t = Math.min(1, Math.max(0, Number(q.get("zoom") ?? 0) || 0))
     const at = q.get("at")?.split(",").map(Number)
@@ -196,12 +229,13 @@ function CameraRig() {
       ctl.minPolarAngle = ctl.maxPolarAngle = pitch
       ctl.update()
     }
-    // pan limit: the continents' box, less what's already on screen, plus a margin
-    const visH = d * lim.tan
-    const mx = Math.max(0, lim.halfW - visH * lim.aspect) + LAB3D.panMargin * W
-    const mz = Math.max(0, lim.halfH - visH) + LAB3D.panMargin * W
-    const tx = Math.min(lim.cx + mx, Math.max(lim.cx - mx, ctl.target.x))
-    const tz = Math.min(lim.cz + mz, Math.max(lim.cz - mz, ctl.target.z))
+    // pan limit: the top-down view at this distance (half extents d tan, d tan aspect) stays inside the land box
+    const hz = d * lim.tan
+    const hx = hz * lim.aspect
+    const keepIn = (v: number, lo: number, hi: number, half: number) =>
+      lo + half >= hi - half ? (lo + hi) / 2 : Math.min(hi - half, Math.max(lo + half, v))
+    const tx = keepIn(ctl.target.x, lim.x0, lim.x1, hx)
+    const tz = keepIn(ctl.target.z, lim.z0, lim.z1, hz)
     if (tx !== ctl.target.x || tz !== ctl.target.z) {
       const dx = tx - ctl.target.x
       const dz = tz - ctl.target.z

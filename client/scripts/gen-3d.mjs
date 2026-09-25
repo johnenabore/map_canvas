@@ -1,20 +1,27 @@
 // Textures for the /lab/3d spike, rendered from the three LOD tiers with sharp (as in scripts/raster.mjs).
-// Usage: npm run gen3d -> public/maps/3d/
+// Usage: npm run gen3d -> public/maps/3d/ (+ the preview in lab3d-preview/)
 //   color.webp          base+terrain+detail at 4096px, the title/legend band and the frame replaced by open
 //                       sea, land along the old frame edges dissolving into mist (the compass stays)
 //   sea-tile.webp       seamless sea (parchment tone + faint ink wave marks) for the world plane around the
 //                       map; the same tile is painted into color.webp's sea margin on the same grid, so the
 //                       two meet without a seam
-//   height.png          1024px grayscale: land plateau 0.15 + blurred relief 0.85; sea and removed areas 0
-//   normal.png          tangent-space normals from height.png (Sobel)
-//   preview-height.png  height | hillshaded colour, side by side, for judging the relief
-import { mkdir, readFile } from "node:fs/promises"
+//   height.png          1024px, 16-bit height in two bytes: R = high byte (on its own the 8-bit height the
+//                       displacement and the pins read), G = low byte (the scene's shader derives normals
+//                       from R+G, so no normal map is needed and 8-bit terracing doesn't ripple the light);
+//                       land plateau 0.15 + relief 0.85, rising from the coast over a smooth ramp; sea and
+//                       removed areas exactly 0
+//   land-bounds.json    bounding box of the land (the flood-fill land mask, where it survives the dissolve),
+//                       in map UV (v down from the top edge) and world units; the scene frames the camera on it
+//   lab3d-preview/preview-height.png   height | hillshaded colour, for judging the relief (git-ignored)
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import sharp from "sharp"
 
 const maps = fileURLToPath(new URL("../public/maps/", import.meta.url))
 const outDir = maps + "3d/"
+const previewDir = fileURLToPath(new URL("../lab3d-preview/", import.meta.url))
 const VIEWBOX_W = 903 // matches MAP.w in lib/map.ts
+const WORLD = { w: 903 / 100, h: 672.75 / 100 } // the scene's map plane: MAP.w/100 x MAP.h/100 world units
 
 const CFG = {
   colorW: 4096,
@@ -30,12 +37,15 @@ const CFG = {
   letterCream: 0.3,    // an enclosed pocket that's at least this cream is lettering on the sea, not land
   minLand: 40,         // px (at 1024): smaller pockets are specks, not land
   land: 0.15,
-  landBlur: 6,         // gaussian sigma, px at 1024
+  coastRamp: 16,       // px at 1024: the land plateau rises from 0 at the coast over this...
+  reliefRamp: 48,      // ...and the relief over this, so coasts are gentle lowlands (soft rims, no cliff)
   relief: 0.85,
-  reliefBlur: 24,
+  reliefBlur: 24,      // gaussian sigma, px at 1024 (in float, so no 8-bit terraces)
   tile: 512,           // sea tile, px; 8 tiles across the 4096px map, so the scene can line the world plane up
   waves: 26,           // ink wave marks per tile
-  normalStrength: 6,   // slope exaggeration baked into normal.png (normalScale in the scene tunes it further)
+  // the hillshade in the preview mimics the scene's shader normals: LAB3D.displacementScale and
+  // LAB3D.reliefExaggeration in components/lab3d/Scene.tsx
+  preview: { displacement: 0.12, exaggeration: 3.5, sun: [-7, 3.4, -5] },
 }
 // open-sea sample boxes (fractions of w/h), for the sea colour and as flood-fill seeds
 const SEA = [[0.18, 0.56, 0.3, 0.64], [0.33, 0.57, 0.39, 0.62], [0.79, 0.73, 0.91, 0.79], [0.59, 0.745, 0.68, 0.79], [0.05, 0.36, 0.1, 0.43]]
@@ -244,92 +254,137 @@ const isSea = new Uint8Array(N)
   console.log(`land mask: ${((landPx / N) * 100).toFixed(1)}% of the map is land (${relabelled} lettering/speck pockets returned to sea)`)
 }
 
-// ---------- height.png
-const gray = (arr) => sharp(Buffer.from(arr), { raw: { width: w, height: h, channels: 1 } })
-// (extractChannel(0): sharp hands back 3 channels after blurring a 1-channel raw input)
-const land = await gray(Uint8Array.from(isSea, (s) => (s ? 0 : 255))).blur(CFG.landBlur).extractChannel(0).raw().toBuffer()
+// ---------- height: relief from the terrain+detail coverage (blurred in float), on a land plateau that rises
+// from the coast over a smooth ramp (distance into the land), so the sea stays exactly 0 and the coast step
+// is soft
+function gaussian(src, sigma) {
+  const r = Math.ceil(sigma * 3)
+  const kernel = Float32Array.from({ length: 2 * r + 1 }, (_, i) => Math.exp(-((i - r) ** 2) / (2 * sigma * sigma)))
+  const total = kernel.reduce((a, b) => a + b, 0)
+  let cur = src
+  for (const horizontal of [true, false]) {
+    const dst = new Float32Array(N)
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let acc = 0
+        for (let k = -r; k <= r; k++) {
+          const xx = horizontal ? Math.min(w - 1, Math.max(0, x + k)) : x
+          const yy = horizontal ? y : Math.min(h - 1, Math.max(0, y + k))
+          acc += cur[yy * w + xx] * kernel[k + r]
+        }
+        dst[y * w + x] = acc / total
+      }
+    cur = dst
+  }
+  return cur
+}
 const reliefTiers = await Promise.all(svgs.slice(1).map((s) => render(s, CFG.heightW)))
 const reliefRaw = await sharp(reliefTiers[0]).composite([{ input: reliefTiers[1] }]).png().toBuffer()
-const coverage = await sharp(reliefRaw).extractChannel(3).blur(CFG.reliefBlur).extractChannel(0).raw().toBuffer()
-if (land.length !== N || coverage.length !== N) throw new Error(`expected ${N} px, got ${land.length} / ${coverage.length}`)
+const alpha = await sharp(reliefRaw).extractChannel(3).raw().toBuffer()
+if (alpha.length !== N) throw new Error(`expected ${N} px, got ${alpha.length}`)
+// sRGB-encoded after the blur: the earlier (8-bit, sharp) version blurred in linear light and returned encoded
+// values, which lifts sparse areas; this keeps that relief curve, just without the 8-bit terraces
+const srgbEncode = (v) => (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055)
+const coverage = gaussian(Float32Array.from(alpha, (a) => a / 255), CFG.reliefBlur).map(srgbEncode)
 // normalized = stretched between the 5th and 99.5th percentile of coverage on land (coverage saturates
 // over most of the land, so dividing by the peak alone would leave a flat plateau)
 const onLand = Array.from(coverage).filter((_, p) => !isSea[p]).sort((a, b) => a - b)
 const lo = onLand[Math.floor(onLand.length * 0.05)]
-const peak = Math.max(lo + 1, onLand[Math.floor(onLand.length * 0.995)])
+const peak = Math.max(lo + 1e-3, onLand[Math.floor(onLand.length * 0.995)])
+// distance into the land, px x 3 (chamfer 3-4, two passes)
+const dist = Float32Array.from(isSea, (s) => (s ? 0 : 1e9))
+for (const [ys, dir] of [[0, 1], [h - 1, -1]])
+  for (let y = ys; y >= 0 && y < h; y += dir)
+    for (let x = dir > 0 ? 0 : w - 1; x >= 0 && x < w; x += dir) {
+      const p = y * w + x
+      if (!dist[p]) continue
+      for (const [dx, dy, c] of [[-dir, 0, 3], [-dir, -dir, 4], [0, -dir, 3], [dir, -dir, 4]]) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx >= 0 && ny >= 0 && nx < w && ny < h) dist[p] = Math.min(dist[p], dist[ny * w + nx] + c)
+      }
+    }
+// the ramps, blurred so the chamfer distance's straight creases (its medial axis) don't show in the shading
+const rampAt = (len, sigma) => gaussian(Float32Array.from(dist, (v, p) => (isSea[p] ? 0 : smooth(v / 3 / len))), sigma)
+const plateauRamp = rampAt(CFG.coastRamp, 3)
+const reliefRamp = rampAt(CFG.reliefRamp, 8)
 const height = new Float32Array(N)
 for (let y = 0; y < h; y++)
   for (let x = 0; x < w; x++) {
     const p = y * w + x
+    if (isSea[p]) continue
     const u = x / (w - 1)
     const t = y / (h - 1)
-    const l = land[p] / 255
-    const relief = Math.max(0, Math.min(1, (coverage[p] - lo) / (peak - lo))) * CFG.relief * l // relief only on land
+    const relief = Math.max(0, Math.min(1, (coverage[p] - lo) / (peak - lo))) * CFG.relief
     const k = keep(u, t) * (1 - compassK(u, t)) // removed areas and the compass stay flat
-    height[p] = Math.min(1, (l * CFG.land + relief) * k)
+    height[p] = Math.min(1, (plateauRamp[p] * CFG.land + reliefRamp[p] * relief) * k)
   }
-await gray(Uint8Array.from(height, (v) => Math.round(v * 255))).png().toFile(outDir + "height.png")
-
-// ---------- normal.png (Sobel; OpenGL convention: +x right, +y up, as three.js expects)
-// the blurs above are 8-bit, so the height has tiny terraces that Sobel turns into ripples: smooth a copy
-// in float (two passes of a 5px box blur) for the normals only
-const soft = (() => {
-  let src = height
-  for (let pass = 0; pass < 2; pass++)
-    for (const horizontal of [true, false]) {
-      const dst = new Float32Array(N)
-      for (let y = 0; y < h; y++)
-        for (let x = 0; x < w; x++) {
-          let sum = 0
-          for (let k = -2; k <= 2; k++) {
-            const xx = horizontal ? Math.min(w - 1, Math.max(0, x + k)) : x
-            const yy = horizontal ? y : Math.min(h - 1, Math.max(0, y + k))
-            sum += src[yy * w + xx]
-          }
-          dst[y * w + x] = sum / 5
-        }
-      src = dst
-    }
-  return src
-})()
-const hAt = (x, y) => soft[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))]
-const normal = Buffer.alloc(N * 3)
-const shade = new Float32Array(N) // hillshade for the preview: light from the top-left, low
-const L = (() => { const v = [-0.6, 0.55, 0.58]; const m = Math.hypot(...v); return v.map((c) => c / m) })()
-for (let y = 0; y < h; y++)
-  for (let x = 0; x < w; x++) {
-    const gx = hAt(x + 1, y - 1) + 2 * hAt(x + 1, y) + hAt(x + 1, y + 1) - hAt(x - 1, y - 1) - 2 * hAt(x - 1, y) - hAt(x - 1, y + 1)
-    const gy = hAt(x - 1, y + 1) + 2 * hAt(x, y + 1) + hAt(x + 1, y + 1) - hAt(x - 1, y - 1) - 2 * hAt(x, y - 1) - hAt(x + 1, y - 1)
-    // image y runs down, texture v up: d/dv = -d/dy
-    let nx = -gx * CFG.normalStrength
-    let ny = gy * CFG.normalStrength
-    let nz = 1
-    const m = Math.hypot(nx, ny, nz)
-    nx /= m
-    ny /= m
-    nz /= m
-    const p = y * w + x
-    normal[p * 3] = Math.round((nx * 0.5 + 0.5) * 255)
-    normal[p * 3 + 1] = Math.round((ny * 0.5 + 0.5) * 255)
-    normal[p * 3 + 2] = Math.round((nz * 0.5 + 0.5) * 255)
-    shade[p] = Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]) / L[2]
-  }
-await sharp(normal, { raw: { width: w, height: h, channels: 3 } }).png().toFile(outDir + "normal.png")
-
-// ---------- preview-height.png: height (left) | colour x hillshade (right)
 {
+  const out = Buffer.alloc(N * 3)
+  for (let p = 0; p < N; p++) {
+    const v = Math.round(height[p] * 65535)
+    out[p * 3] = out[p * 3 + 2] = v >> 8
+    out[p * 3 + 1] = v & 255
+  }
+  await sharp(out, { raw: { width: w, height: h, channels: 3 } }).png({ compressionLevel: 9, adaptiveFiltering: true }).toFile(outDir + "height.png")
+}
+
+// ---------- land-bounds.json: where the land is, as the viewer sees it (the land mask where the dissolve
+// keeps at least half of it)
+const bounds = (() => {
+  let x0 = w
+  let y0 = h
+  let x1 = -1
+  let y1 = -1
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (!isSea[y * w + x] && keep(x / (w - 1), y / (h - 1)) >= 0.5) {
+        x0 = Math.min(x0, x)
+        x1 = Math.max(x1, x)
+        y0 = Math.min(y0, y)
+        y1 = Math.max(y1, y)
+      }
+  const r4 = (v) => Math.round(v * 1e4) / 1e4
+  const uv = { u0: r4(x0 / w), u1: r4((x1 + 1) / w), v0: r4(y0 / h), v1: r4((y1 + 1) / h) }
+  return {
+    note: "land bounding box. uv: fractions of the map, v down from the top edge. world: the scene's map plane, centred on the origin, x right, z south (down the map).",
+    uv,
+    world: {
+      x0: r4((uv.u0 - 0.5) * WORLD.w),
+      x1: r4((uv.u1 - 0.5) * WORLD.w),
+      z0: r4((uv.v0 - 0.5) * WORLD.h),
+      z1: r4((uv.v1 - 0.5) * WORLD.h),
+    },
+  }
+})()
+await writeFile(outDir + "land-bounds.json", JSON.stringify(bounds, null, 2) + "\n")
+
+// ---------- preview-height.png: height (left) | colour x hillshade (right), shaded like the scene's shader
+{
+  const P = CFG.preview
+  const s = (P.displacement / (2 * (WORLD.w / w))) * P.exaggeration
+  const L = (() => {
+    const m = Math.hypot(...P.sun)
+    return P.sun.map((c) => c / m)
+  })()
+  const hAt = (x, y) => height[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))]
   const colorSmall = await sharp(outDir + "color.webp").resize(w, h).removeAlpha().raw().toBuffer()
   const out = Buffer.alloc(w * 2 * h * 3)
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
       const p = y * w + x
+      // world normal of the displaced surface: x right, y up, z south (image down)
+      const n = [(hAt(x - 1, y) - hAt(x + 1, y)) * s, 1, (hAt(x, y - 1) - hAt(x, y + 1)) * s]
+      const m = Math.hypot(...n)
+      const shade = Math.max(0, (n[0] * L[0] + n[1] * L[1] + n[2] * L[2]) / m) / L[1]
       const g = Math.round(height[p] * 255)
       const o = (y * w * 2 + x) * 3
       out[o] = out[o + 1] = out[o + 2] = g
       const q = (y * w * 2 + w + x) * 3
-      for (let c = 0; c < 3; c++) out[q + c] = Math.min(255, Math.round(colorSmall[p * 3 + c] * (0.55 + 0.45 * shade[p])))
+      for (let c = 0; c < 3; c++) out[q + c] = Math.min(255, Math.round(colorSmall[p * 3 + c] * (0.55 + 0.45 * shade)))
     }
-  await sharp(out, { raw: { width: w * 2, height: h, channels: 3 } }).png().toFile(outDir + "preview-height.png")
+  await mkdir(previewDir, { recursive: true })
+  await sharp(out, { raw: { width: w * 2, height: h, channels: 3 } }).png().toFile(previewDir + "preview-height.png")
 }
 
 let maxH = 0
@@ -338,5 +393,6 @@ for (const v of height) {
   maxH = Math.max(maxH, v)
   sum += v
 }
-console.log(`height.png / normal.png ${w}x${h}: land coverage p5..p99.5 ${lo}..${peak}/255, max height ${maxH.toFixed(2)}, mean ${(sum / N).toFixed(3)}`)
-console.log("wrote public/maps/3d/: color.webp, sea-tile.webp, height.png, normal.png, preview-height.png")
+console.log(`height.png ${w}x${h} (16-bit in R+G): land coverage p5..p99.5 ${lo.toFixed(3)}..${peak.toFixed(3)}, max height ${maxH.toFixed(2)}, mean ${(sum / N).toFixed(3)}`)
+console.log(`land bounds: uv u ${bounds.uv.u0}..${bounds.uv.u1}, v ${bounds.uv.v0}..${bounds.uv.v1} | world x ${bounds.world.x0}..${bounds.world.x1}, z ${bounds.world.z0}..${bounds.world.z1}`)
+console.log("wrote public/maps/3d/: color.webp, sea-tile.webp, height.png, land-bounds.json; lab3d-preview/preview-height.png")
