@@ -10,7 +10,8 @@
     "placeholder": "node scripts/placeholder.mjs",
     "raster": "node scripts/raster.mjs",
     "atmos": "node scripts/gen-atmosphere.mjs",
-    "lod": "node scripts/split-lod.mjs"
+    "lod": "node scripts/split-lod.mjs",
+    "discoveries": "node scripts/gen-discoveries.mjs"
   },
   "dependencies": {
     "next": "16.3.6",

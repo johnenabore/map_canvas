@@ -6,6 +6,7 @@ export const MAP_BLUR = "data:image/webp;base64,UklGRgQFAABXRUJQVlA4WAoAAAAQAAAA
 // zoom thresholds for "level of detail"
 export const LVL2 = 1.8
 export const LVL3 = 3.2
+export const LVL4 = 4.2 // deep zoom: the discoveries appear (see DISCOVER)
 
 // Zoom reveals terrain detail: `npm run lod` (scripts/split-lod.mjs) splits the traced map into three
 // tiers by shape size. Terrain fades in at LVL2 and detail at LVL3 (level-triggered CSS fades).
@@ -36,6 +37,26 @@ export const REVEAL = {
   focalFreshMs: 1000,                 // a gesture's focal point counts for this long, then the viewport centre
   pinStaggerMs: 50,                   // stamp-in delay between pins, by distance from the focal point
   pinStampMs: 380,
+} as const
+
+// Deep-zoom discoveries (Discoveries.tsx; placements in data/discoveries.json, art from `npm run discoveries`):
+// small ink details that exist only from LVL4. They stamp in like the pins (nearest the focal point first)
+// and fade out below LVL4 - hysteresis; below that the layer is display:none. Tapping one shows a parchment
+// card; finds are remembered in localStorage. Kept with ?atmos=0 (they're content); static under reduced motion.
+export const DISCOVER = {
+  enabled: true,
+  size: 1.7,              // % of the map width per 64 art units (a ship at scale 1: ~75px on a phone at LVL4)
+  hysteresis: 0.1,        // shown from LVL4, hidden again only below LVL4 - this
+  staggerMs: 60,          // stamp-in delay between discoveries, by distance from the focal point
+  stampMs: 380,           // stamp-in duration (the pins' stamp)
+  fadeOutMs: 300,         // zooming back out
+  cardMs: 6000,           // the card closes by itself after this (not while hovered/focused, never when opened by keyboard)
+  minTargetPx: 44,        // tap target at LVL4, screen px (an invisible margin makes up for small glyphs)
+  storageKey: "protheka-discoveries",
+  bobS: 4.6,              // ship/rowboat/bottle rocking loop
+  coilS: 5.4,             // serpent coils rising and sinking
+  flameS: 0.9,            // campfire flicker
+  smokeS: [4.5, 6.5],     // campfire smoke wisps (the volcano's wisp textures)
 } as const
 
 // atmosphere tunables (textures: npm run atmos -> public/maps/atmos/)

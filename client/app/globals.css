@@ -105,11 +105,117 @@
   78%  { transform: scale(1.03); }
   100% { transform: scale(1); opacity: 1; }
 }
-.poi-pin.stamp {
+.poi-pin.stamp,
+.disc-stamp.stamp {
   animation-name: poi-stamp;
   animation-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
   animation-fill-mode: both;
 }
+
+/* ---- deep-zoom discoveries (Discoveries.tsx; DISCOVER in lib/map.ts, art: npm run discoveries) ----
+   display:none below LVL4. MapContent sets data-discoveries="on" (then stamps each one in with the pins'
+   stamp, transform + opacity) and "out" to fade the layer before hiding it again. */
+.map .disc-layer { display: none; transition: opacity .3s ease-out; } /* duration from DISCOVER.fadeOutMs */
+.map[data-discoveries] .disc-layer { display: block; }
+.map[data-discoveries="out"] .disc-layer { opacity: 0; }
+.map .disc {
+  position: absolute; translate: -50% -50%;
+  padding: 0; border: 0; background: none; cursor: pointer;
+  pointer-events: auto; -webkit-tap-highlight-color: transparent;
+}
+/* invisible hit margin: the tap target is at least DISCOVER.minTargetPx on screen at LVL4 */
+.map .disc::before {
+  content: ""; position: absolute; left: 50%; top: 50%; translate: -50% -50%;
+  width: max(100%, var(--disc-min)); height: max(100%, var(--disc-min));
+}
+.map .disc:focus-visible { outline: 2px solid #3f1d0e; outline-offset: 3px; border-radius: 4px; }
+.disc-stamp, .disc-art { position: absolute; inset: 0; display: block; }
+.disc-part { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.disc-smoke { opacity: .7; }
+/* subtle life: CSS transform animations on the outer <svg> of a part, so each runs on the compositor on
+   its own layer (no will-change: that would pin its raster scale and blur it at deeper zoom) */
+.disc-anim { animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.disc-anim-bob { animation-name: disc-bob; }
+.disc-anim-coil { animation-name: disc-coil; }
+.disc-anim-flame { animation-name: disc-flame; animation-timing-function: linear; }
+@keyframes disc-bob { /* rocking on the swell, % of the art box */
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  25% { transform: translate3d(0, -1.6%, 0) rotate(-2deg); }
+  50% { transform: translate3d(0, .6%, 0) rotate(0deg); }
+  75% { transform: translate3d(0, -1%, 0) rotate(1.8deg); }
+}
+@keyframes disc-coil { /* a coil sinks behind the foam and rises again; phases differ per coil */
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, 6.5%, 0); }
+}
+@keyframes disc-flame { /* mostly steady, with quick catches */
+  0%   { transform: scale(1, 1); }
+  12%  { transform: scale(.94, 1.08); }
+  24%  { transform: scale(1.03, .95); }
+  37%  { transform: scale(.97, 1.05); }
+  50%  { transform: scale(1.02, .92); }
+  63%  { transform: scale(.95, 1.1); }
+  76%  { transform: scale(1.04, .97); }
+  88%  { transform: scale(.98, 1.04); }
+  100% { transform: scale(1, 1); }
+}
+
+/* the card: map-space (moves with the map), kept at screen size by KeepScale, above the pins */
+.disc-card-anchor { position: absolute; width: 0; height: 0; }
+.disc-card-anchor > div { will-change: transform; } /* KeepScale rewrites its transform every zoom frame */
+.disc-card-pos {
+  position: absolute; left: 0; bottom: 10px; width: max-content; max-width: 236px;
+  translate: calc(-50% + var(--dx, 0px)) 0; /* --dx: nudged to stay on screen (Discoveries.tsx) */
+}
+.disc-card-pos[data-side="below"] { bottom: auto; top: 10px; }
+.disc-card {
+  position: relative; padding: 9px 12px 10px;
+  border-radius: 6px; border: 1px solid #9b8066;
+  background: #f4efcf; color: #3f1d0e;
+  box-shadow: 0 4px 14px rgba(63, 29, 14, .3);
+  font-size: 13px; line-height: 1.4;
+  transform-origin: calc(50% - var(--dx, 0px)) 100%;
+  animation: disc-card-in .22s cubic-bezier(.2, .8, .3, 1) both;
+}
+.disc-card-pos[data-side="below"] .disc-card { transform-origin: calc(50% - var(--dx, 0px)) 0; }
+.disc-card::after { /* the tail points at the discovery, wherever the card was nudged */
+  content: ""; position: absolute; left: calc(50% - var(--dx, 0px)); top: 100%;
+  width: 10px; height: 10px; translate: -50% -50%; rotate: 45deg;
+  background: #f4efcf; border: solid #9b8066; border-width: 0 1px 1px 0;
+}
+.disc-card-pos[data-side="below"] .disc-card::after { top: 0; rotate: 225deg; }
+@keyframes disc-card-in { from { transform: scale(.85) translateY(4px); opacity: 0; } to { transform: none; opacity: 1; } }
+.disc-card-title { font-weight: 700; font-size: 14px; padding-right: 18px; }
+.disc-card-kicker { font-weight: 600; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #7a5a40; }
+.disc-card-lore { margin-top: 2px; }
+/* first find: the ink stamp comes down on the card's corner */
+.disc-card-stamp {
+  position: absolute; right: -12px; top: -14px; width: 38px; height: 38px;
+  rotate: -14deg; opacity: .88;
+  animation: disc-stamp-in .45s .12s cubic-bezier(.2, .8, .3, 1) both;
+}
+@keyframes disc-stamp-in {
+  0%   { transform: scale(2.4); opacity: 0; }
+  55%  { transform: scale(.88); opacity: .88; }
+  75%  { transform: scale(1.06); }
+  100% { transform: scale(1); opacity: .88; }
+}
+
+/* corner counter chip (screen space): fades in after the first find, bumps on each new one */
+.disc-counter {
+  position: absolute; left: 12px; top: calc(12px + env(safe-area-inset-top)); pointer-events: none;
+  opacity: 0; visibility: hidden; transition: opacity .4s ease-out, visibility 0s .4s;
+}
+.disc-counter[data-on] { opacity: 1; visibility: visible; transition: opacity .4s ease-out; }
+.disc-counter-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 5px;
+  border-radius: 999px; border: 1px solid #9b8066; background: #f4efcf; color: #3f1d0e;
+  box-shadow: 0 2px 8px rgba(20, 8, 2, .3);
+  font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.disc-counter-chip.bump { animation: disc-bump .5s .35s ease-out; }
+@keyframes disc-bump { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.14); } }
+.disc-counter-icon { position: relative; display: block; width: 18px; height: 18px; }
 
 /* map-space: the paper is not promoted (multiplies the base tier inside the content layer's raster);
    the edges sit above the promoted tiers, so they're a pre-promoted static layer */
@@ -268,7 +374,7 @@
 
 /* all ambient motion pauses while the user moves (.moving: MapContent's will-change debounce) and while
    the tab is hidden (.tab-hidden: MapShell), both on the .map-shell root */
-.map-shell:is(.moving, .tab-hidden) :is(.atmos-shadow, .atmos-wisp, .atmos-birds-x, .atmos-birds-y, .atmos-bird, .atmos-flicker) {
+.map-shell:is(.moving, .tab-hidden) :is(.atmos-shadow, .atmos-wisp, .atmos-birds-x, .atmos-birds-y, .atmos-bird, .atmos-flicker, .disc-anim) {
   animation-play-state: paused;
 }
 
@@ -285,4 +391,7 @@
   .poi-ripple { display: none; }
   .map .lod-tier { transition: none; } /* tiers switch instantly */
   .poi-pin.stamp { animation: none; }
+  /* discoveries: static art (the campfire keeps one still wisp, as above), instant show/hide */
+  .disc-anim, .disc-stamp.stamp, .disc-card, .disc-card-stamp, .disc-counter-chip.bump { animation: none; }
+  .map .disc-layer, .disc-counter { transition: none; }
 }

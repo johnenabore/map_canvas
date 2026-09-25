@@ -1,0 +1,134 @@
+[
+  {
+    "id": "salt-wren",
+    "kind": "ship",
+    "x": 24,
+    "y": 58.5,
+    "rotation": 0,
+    "scale": 1,
+    "flip": false,
+    "name": "The Salt Wren",
+    "lore": "A salt trader running for Aldhollow ahead of the autumn gales. Her captain swears she has outsailed the serpent twice."
+  },
+  {
+    "id": "coiled-one",
+    "kind": "serpent",
+    "x": 35,
+    "y": 60.5,
+    "rotation": 0,
+    "scale": 1,
+    "flip": false,
+    "name": "The Coiled One",
+    "lore": "Rach fishermen count its coils to read the weather: three above the water means a storm by nightfall."
+  },
+  {
+    "id": "old-greyback",
+    "kind": "whale",
+    "x": 19,
+    "y": 60.5,
+    "rotation": 0,
+    "scale": 0.9,
+    "flip": false,
+    "name": "Old Greyback",
+    "lore": "A whale older than the Council of Thirteen. Sailors tip a cup of ale over the side whenever her tail rises."
+  },
+  {
+    "id": "merrows-bell",
+    "kind": "wreck",
+    "x": 87.5,
+    "y": 76.5,
+    "rotation": -4,
+    "scale": 0.95,
+    "flip": false,
+    "name": "Wreck of the Merrow's Bell",
+    "lore": "She went down with a hold full of temple bells. On still nights the divers say one of them still rings."
+  },
+  {
+    "id": "ferrymans-skiff",
+    "kind": "rowboat",
+    "x": 63.5,
+    "y": 77,
+    "rotation": 4,
+    "scale": 0.9,
+    "flip": true,
+    "name": "The Ferryman's Skiff",
+    "lore": "A lone rower who takes no coin, only a story. Nobody on the Prazn shore will say where the skiff goes."
+  },
+  {
+    "id": "message-bottle",
+    "kind": "bottle",
+    "x": 11,
+    "y": 38,
+    "rotation": 0,
+    "scale": 1,
+    "flip": false,
+    "name": "A Message in a Bottle",
+    "lore": "The note inside is addressed to \"whoever finds the edge of the map\", and signed with your name."
+  },
+  {
+    "id": "nine-dancers",
+    "kind": "stones",
+    "x": 62.5,
+    "y": 30.5,
+    "rotation": 0,
+    "scale": 0.85,
+    "flip": false,
+    "name": "The Nine Dancers",
+    "lore": "A ring of standing stones on the Pynchas plain. No two travellers have ever counted the same number."
+  },
+  {
+    "id": "hasks-watch",
+    "kind": "tower",
+    "x": 70,
+    "y": 33.5,
+    "rotation": 0,
+    "scale": 0.95,
+    "flip": false,
+    "name": "Hask's Watch",
+    "lore": "A watchtower with no garrison and no key to its door. Someone still lights the lamp every seventh night."
+  },
+  {
+    "id": "oathstone",
+    "kind": "runestone",
+    "x": 86,
+    "y": 42,
+    "rotation": 0,
+    "scale": 1,
+    "flip": false,
+    "name": "The Oathstone",
+    "lore": "Its runes name a king no chronicle remembers, and the moss of the Oshta shore will not grow over them."
+  },
+  {
+    "id": "strangers-fire",
+    "kind": "campfire",
+    "x": 92.2,
+    "y": 85.2,
+    "rotation": 0,
+    "scale": 0.95,
+    "flip": false,
+    "name": "A Stranger's Fire",
+    "lore": "Still warm. Whoever sat here left in a hurry and took the kettle, but not the stew."
+  },
+  {
+    "id": "cartographers-tent",
+    "kind": "tent",
+    "x": 26.5,
+    "y": 47,
+    "rotation": 0,
+    "scale": 0.95,
+    "flip": false,
+    "name": "The Cartographer's Tent",
+    "lore": "Whoever drew this map slept here. The ink pots are still full and the last page is blank."
+  },
+  {
+    "id": "young-wyrm",
+    "kind": "dragon",
+    "x": 39,
+    "y": 69.5,
+    "rotation": -8,
+    "scale": 0.9,
+    "flip": false,
+    "name": "A Young Wyrm",
+    "lore": "Too small to be feared and too curious to keep away from the smoke of Kalyunbar."
+  }
+]

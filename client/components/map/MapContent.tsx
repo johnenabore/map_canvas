@@ -1,11 +1,13 @@
 "use client"
 import { useEffect, useRef, useState, type RefObject } from "react"
 import { useTransformEffect, useTransformInit, type ReactZoomPanPinchContext } from "react-zoom-pan-pinch"
-import { LOD, MAP, MAP_BLUR, LVL2, LVL3, POIS, REVEAL, type POI } from "@/lib/map"
+import { DISCOVER, LOD, MAP, MAP_BLUR, LVL2, LVL3, LVL4, POIS, REVEAL, type POI } from "@/lib/map"
 import { useReducedMotion } from "@/lib/useReducedMotion"
 import PoiPin from "./PoiPin"
 import { MapPaper, MapSpaceAtmos } from "./Atmosphere"
 import Birds from "./Birds"
+import { DiscoveryCard, DiscoveryLayer } from "./Discoveries"
+import { DISCOVERIES, closeDiscovery } from "./discoveryStore"
 import type { IntroLink } from "./Intro"
 
 type Tier = "terrain" | "detail"
@@ -93,6 +95,9 @@ export default function MapContent({
     terrain: { anims: null, timer: 0 },
     detail: { anims: null, timer: 0 },
   })
+  const discLayer = useRef<HTMLDivElement>(null)
+  const discShown = useRef(false)
+  const discTimer = useRef(0)
   const inst = useRef<ReactZoomPanPinchContext | null>(null)
   const focal = useRef<(Point & { t: number }) | null>(null) // last gesture focal point
   const [ready, setReady] = useState(false)
@@ -221,25 +226,63 @@ export default function MapContent({
     }
   }
 
+  // (re)start the stamp-in on an element: transform + opacity, delayed by its place in the queue
+  const stamp = (el: HTMLElement, delayMs: number, durationMs: number) => {
+    el.classList.remove("stamp")
+    el.style.animationDuration = `${durationMs}ms`
+    el.style.animationDelay = `${delayMs}ms`
+    void el.offsetWidth // restart cleanly if it was still stamping
+    el.classList.add("stamp")
+    el.addEventListener("animationend", () => el.classList.remove("stamp"), { once: true })
+  }
+  // nearest the focal point first
+  const byDistance = <T extends Point>(items: T[]) => {
+    const f = focalNow()
+    return items
+      .map((item) => ({ item, d: Math.hypot(((item.x - f.x) * MAP.w) / 100, ((item.y - f.y) * MAP.h) / 100) }))
+      .sort((a, b) => a.d - b.d)
+      .map(({ item }) => item)
+  }
+
   // pins that appear at a new level stamp in, closest to the focal point first (transform + opacity on
   // the pin button; KeepScale owns the wrapper's transform). Pins already visible don't animate.
   const stampPins = (from: number, to: number) => {
     const map = ref.current
     if (!map || plain.current) return
-    const f = focalNow()
-    POIS.filter((p) => p.minLevel > from && p.minLevel <= to)
-      .map((p) => ({ p, d: Math.hypot(((p.x - f.x) * MAP.w) / 100, ((p.y - f.y) * MAP.h) / 100) }))
-      .sort((a, b) => a.d - b.d)
-      .forEach(({ p }, i) => {
-        const pin = map.querySelector<HTMLElement>(`#poi-${p.id} .poi-pin`)
-        if (!pin) return
-        pin.classList.remove("stamp")
-        pin.style.animationDuration = `${REVEAL.pinStampMs}ms`
-        pin.style.animationDelay = `${i * REVEAL.pinStaggerMs}ms`
-        void pin.offsetWidth // restart cleanly if it was still stamping
-        pin.classList.add("stamp")
-        pin.addEventListener("animationend", () => pin.classList.remove("stamp"), { once: true })
+    byDistance(POIS.filter((p) => p.minLevel > from && p.minLevel <= to)).forEach((p, i) => {
+      const pin = map.querySelector<HTMLElement>(`#poi-${p.id} .poi-pin`)
+      if (pin) stamp(pin, i * REVEAL.pinStaggerMs, REVEAL.pinStampMs)
+    })
+  }
+
+  // Deep-zoom discoveries: shown from LVL4 (hidden again only below LVL4 - hysteresis). ON = display, then
+  // every discovery stamps in like the pins, nearest the focal point first; OFF = the layer fades
+  // (opacity), then display:none, and any open card closes. Back ON mid-fade just fades back in.
+  const syncDiscoveries = (scale: number) => {
+    const map = ref.current
+    if (!map || !DISCOVER.enabled) return
+    const want = scale >= (discShown.current ? LVL4 - DISCOVER.hysteresis : LVL4)
+    if (want === discShown.current) return
+    discShown.current = want
+    clearTimeout(discTimer.current)
+    if (want) {
+      const fading = map.dataset.discoveries === "out"
+      map.dataset.discoveries = "on"
+      const layer = discLayer.current
+      if (fading || !layer || plain.current) return
+      byDistance(DISCOVERIES).forEach((d, i) => {
+        const el = layer.querySelector<HTMLElement>(`.disc[data-id="${d.id}"] .disc-stamp`)
+        if (el) stamp(el, i * DISCOVER.staggerMs, DISCOVER.stampMs)
       })
+    } else {
+      closeDiscovery()
+      if (plain.current) {
+        delete map.dataset.discoveries
+        return
+      }
+      map.dataset.discoveries = "out"
+      discTimer.current = window.setTimeout(() => delete map.dataset.discoveries, DISCOVER.fadeOutMs)
+    }
   }
 
   // Warm up before the first gesture: decode the base tier and promote the GPU layer now, so the first
@@ -345,7 +388,7 @@ export default function MapContent({
     if (!el) return
     last.current.scale = state.scale
     const z = Math.round(state.scale * 100) / 100
-    const lvl = z >= LVL3 ? "3" : z >= LVL2 ? "2" : "1"
+    const lvl = z >= LVL4 ? "4" : z >= LVL3 ? "3" : z >= LVL2 ? "2" : "1"
     if (lvl !== last.current.lvl) {
       const from = Number(last.current.lvl)
       el.dataset.lvl = lvl // pin visibility
@@ -353,6 +396,7 @@ export default function MapContent({
       if (Number(lvl) > from) stampPins(from, Number(lvl))
     }
     syncTiers(state.scale)
+    syncDiscoveries(state.scale)
   })
 
   const fade = `transition-opacity duration-300 motion-reduce:transition-none ${ready ? "opacity-100" : "opacity-0"}`
@@ -388,6 +432,8 @@ export default function MapContent({
           </div>
         </>
       )}
+      {/* deep-zoom discoveries: above the detail tier, below the pins; content, so kept with ?atmos=0 */}
+      {DISCOVER.enabled && <DiscoveryLayer ref={discLayer} />}
       {/* above the map tiers, below the pins (see Atmosphere.tsx for why the order matters) */}
       {atmos && <MapSpaceAtmos />}
       {atmos && <Birds introRef={introRef} />}
@@ -395,6 +441,8 @@ export default function MapContent({
       {POIS.map((p) => (
         <PoiPin key={p.id} poi={p} selected={p.id === selectedId} onTap={onPinTap} />
       ))}
+      {/* after the pins, so a discovery's card sits above them */}
+      {DISCOVER.enabled && <DiscoveryCard />}
     </div>
   )
 }

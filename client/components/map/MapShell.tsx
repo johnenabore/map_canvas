@@ -1,7 +1,7 @@
 "use client"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { TransformWrapper, TransformComponent, type ReactZoomPanPinchContext } from "react-zoom-pan-pinch"
-import { FOCUS, MAP, POIS, SHEET, type POI } from "@/lib/map"
+import { DISCOVER, FOCUS, MAP, POIS, SHEET, type POI } from "@/lib/map"
 import { useReducedMotion } from "@/lib/useReducedMotion"
 import { useMediaQuery } from "@/lib/useMediaQuery"
 import MapContent from "./MapContent"
@@ -13,6 +13,8 @@ import Spotlight from "./Spotlight"
 import { ScreenAtmos } from "./Atmosphere"
 import Intro, { createIntroLink, type IntroLink } from "./Intro"
 import Tilt from "./Tilt"
+import { DiscoveryCounter } from "./Discoveries"
+import { getOpenDiscovery } from "./discoveryStore"
 import { flyTo, focusScale, visibleCentre } from "./camera"
 
 const HISTORY_KEY = "protheka" // marks the history entries we push for an open location
@@ -153,15 +155,16 @@ export default function MapShell({ focus, atmos = true }: { focus?: string; atmo
     const wrapper = inst.wrapperComponent
     if (!wrapper) return
 
-    // a real tap on the map (not a drag or pinch, not a pin) closes the sheet
-    let down: { x: number; y: number; t: number } | null = null
+    // a real tap on the map (not a drag or pinch, not a pin or a discovery) closes the sheet; a tap that
+    // only puts away a discovery's card leaves it open
+    let down: { x: number; y: number; t: number; card: boolean } | null = null
     wrapper.addEventListener("pointerdown", (e) => {
-      down = e.isPrimary ? { x: e.clientX, y: e.clientY, t: e.timeStamp } : null
+      down = e.isPrimary ? { x: e.clientX, y: e.clientY, t: e.timeStamp, card: getOpenDiscovery() !== null } : null
     })
     wrapper.addEventListener("pointerup", (e) => {
       const d = down
       down = null
-      if (!d || !openId.current || (e.target as Element).closest(".poi")) return
+      if (!d || d.card || !openId.current || (e.target as Element).closest(".poi, .disc, .disc-card")) return
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > TAP_PX || e.timeStamp - d.t > TAP_MS) return
       closeRef.current()
     })
@@ -231,6 +234,7 @@ export default function MapShell({ focus, atmos = true }: { focus?: string; atmo
           {atmos && <Tilt shellRef={shellRef} />}
           <div ref={ripples} aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden" />
           <Controls panelOpen={desktop && selected !== null} />
+          {DISCOVER.enabled && <DiscoveryCounter />}
           <SmoothWheel />
         </TransformWrapper>
       </div>
