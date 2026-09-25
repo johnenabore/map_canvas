@@ -29,7 +29,13 @@ const VIEWBOX_H = 672.8 // the traced map's viewBox height (MAP.h rounded, as in
 const WORLD = { w: 903 / 100, h: 672.75 / 100 } // the scene's map plane: MAP.w/100 x MAP.h/100 world units
 
 const CFG = {
-  colorW: 4096,
+  // 3072, not 4096: the base tier is only ever seen at or below the zoom where the terrain tier arrives
+  // (it is 1:1 at about that zoom), and 4096 x 3052 RGBA8 costs 67 MB of GPU memory with its mipmaps
+  // against 37 MB here -- 29 MB saved for detail the reader never gets close enough to want.
+  colorW: 3072,
+  // the two upper tiers cover 14% and 5% of the map, so they carry far less than the base and can be
+  // much smaller: 9 MB each on the GPU instead of 50
+  overlayW: 1536,
   heightW: 1024,
   quality: 85,
   top: 0.14,           // title/legend band, fraction of the map height
@@ -90,9 +96,13 @@ const SEA = [[0.18, 0.56, 0.3, 0.64], [0.33, 0.57, 0.39, 0.62], [0.79, 0.73, 0.9
 const render = async (svg, w) => sharp(svg, { density: (72 * w) / VIEWBOX_W }).resize(w).png().toBuffer()
 const svgs = await Promise.all(["base", "terrain", "detail"].map((t) => readFile(`${maps}protheka-${t}.svg`)))
 const tiers = await Promise.all(svgs.map((s) => render(s, CFG.colorW)))
-// composite first, then read out in a second pipeline (sharp resizes before compositing in one pipeline)
+// composite first, then read out in a second pipeline (sharp resizes before compositing in one pipeline).
+// The stacked map is what the sea colour and the land mask are read from - terrain and detail don't change
+// where the water is, and the mask should see the map as drawn.
 const stacked = await sharp(tiers[0]).composite(tiers.slice(1).map((input) => ({ input }))).png().toBuffer()
-const big = await sharp(stacked).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+// color.webp carries the base tier alone; the two upper tiers ship as overlays the shader soaks in as the
+// reader zooms, so that "zooming reveals terrain detail" is a real reveal and not a magnified raster.
+const big = await sharp(tiers[0]).removeAlpha().raw().toBuffer({ resolveWithObject: true })
 const W = big.info.width
 const H = big.info.height
 const small = await sharp(stacked).resize(CFG.heightW).removeAlpha().raw().toBuffer({ resolveWithObject: true })
@@ -497,7 +507,68 @@ function keep(u, t, guard = 0) {
     }
   }
   const info = await sharp(out, { raw: { width: W, height: H, channels: 3 } }).webp({ quality: CFG.quality }).toFile(outDir + "color.webp")
-  console.log(`color.webp ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB`)
+  console.log(`color.webp ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB (base tier)`)
+}
+
+// ---------- terrain.webp / detail.webp: the two upper tiers as overlays, for the scene to soak in over the
+// base as the reader zooms (the ink-spread reveal in components/lab3d/Scene.tsx). RGB is the tier's own art,
+// straight (not premultiplied) alpha is its own coverage times the dissolve, so an overlay thins out at the
+// island's edge exactly in step with the base beneath it.
+//
+// The rasteriser leaves RGB black wherever a tier draws nothing, and both lossy WebP and the GPU's bilinear
+// filter mix that black into the texels along every shape's edge - a dark fringe around every tree. So the
+// art's own colour is bled a few texels outwards first, by the same normalised convolution that
+// scripts/split-lod.mjs uses to fill the base tier's holes. Alpha is never touched, so the bleed can only
+// change pixels that are already transparent: nothing new becomes visible.
+async function bleedEdges(rgba, width, height) {
+  const n = width * height
+  const src = [0, 1, 2, 3].map((c) => {
+    const b = Buffer.alloc(n)
+    // premultiplied, which is what a normalised convolution needs: sum(colour x weight) / sum(weight)
+    for (let p = 0; p < n; p++) b[p] = c === 3 ? rgba[p * 4 + 3] : Math.round((rgba[p * 4 + c] * rgba[p * 4 + 3]) / 255)
+    return b
+  })
+  const out = Float32Array.from({ length: n * 3 }, (_, i) => rgba[((i / 3) | 0) * 4 + (i % 3)] / 255)
+  const filled = Uint8Array.from({ length: n }, (_, p) => (rgba[p * 4 + 3] > 0 ? 1 : 0))
+  for (const sigma of [1, 2, 4, 8]) {
+    const blurred = await Promise.all(
+      src.map((b) => sharp(b, { raw: { width, height, channels: 1 } }).blur(sigma).raw().toBuffer()),
+    )
+    for (let p = 0; p < n; p++) {
+      if (filled[p]) continue
+      const wa = blurred[3][p] / 255
+      if (wa < 0.05) continue // nothing opaque within reach at this radius; a wider one may find some
+      for (let c = 0; c < 3; c++) out[p * 3 + c] = Math.min(1, blurred[c][p] / 255 / wa)
+      filled[p] = 1
+    }
+  }
+  const px = Buffer.alloc(n * 4)
+  for (let p = 0; p < n; p++) {
+    for (let c = 0; c < 3; c++) px[p * 4 + c] = Math.round(out[p * 3 + c] * 255)
+    px[p * 4 + 3] = rgba[p * 4 + 3]
+  }
+  return px
+}
+
+for (const [i, name] of [[1, "terrain"], [2, "detail"]]) {
+  const { data: px, info: size } = await sharp(await render(svgs[i], CFG.overlayW)).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  const ow = size.width
+  const oh = size.height
+  let covered = 0
+  for (let y = 0; y < oh; y++) {
+    const t = y / (oh - 1)
+    for (let x = 0; x < ow; x++) {
+      const p = (y * ow + x) * 4
+      if (!px[p + 3]) continue
+      const u = x / (ow - 1)
+      px[p + 3] = Math.round(px[p + 3] * keep(u, t, letterKeep(u, t)))
+      if (px[p + 3] > 127) covered++
+    }
+  }
+  const info = await sharp(await bleedEdges(px, ow, oh), { raw: { width: ow, height: oh, channels: 4 } })
+    .webp({ quality: CFG.quality, alphaQuality: 100 })
+    .toFile(outDir + name + ".webp")
+  console.log(`${name}.webp ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB, covers ${((covered / (ow * oh)) * 100).toFixed(1)}% of the map`)
 }
 
 // ---------- height: relief from the terrain+detail coverage (blurred in float), on a land plateau that rises
@@ -608,4 +679,4 @@ for (const v of height) {
 }
 console.log(`height.png ${w}x${h} (16-bit in R+G): land coverage p5..p99.5 ${lo.toFixed(3)}..${peak.toFixed(3)}, max height ${maxH.toFixed(2)}, mean ${(sum / N).toFixed(3)}`)
 console.log(`land bounds: uv u ${bounds.uv.u0}..${bounds.uv.u1}, v ${bounds.uv.v0}..${bounds.uv.v1} | world x ${bounds.world.x0}..${bounds.world.x1}, z ${bounds.world.z0}..${bounds.world.z1}`)
-console.log("wrote public/maps/3d/: color.webp, sea-tile.webp, height.png, land-bounds.json; lab3d-preview/preview-height.png")
+console.log("wrote public/maps/3d/: color.webp, terrain.webp, detail.webp, sea-tile.webp, height.png, land-bounds.json; lab3d-preview/preview-height.png")
