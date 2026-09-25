@@ -198,6 +198,15 @@
 
 /* screen-space: pre-promoted so they're rasterized once, not created mid-gesture when the content layer gets promoted */
 .atmos-screen { position: absolute; inset: 0; pointer-events: none; will-change: transform; }
+/* ?debug=tilt overlay (Tilt.tsx), debug only */
+.tilt-debug {
+  position: absolute; z-index: 30; margin: 0;
+  top: calc(8px + env(safe-area-inset-top)); left: 8px;
+  padding: 6px 8px; border-radius: 6px; pointer-events: none; white-space: pre;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #f4efcf; background: rgba(20, 8, 2, .78);
+}
+
 /* depth tilt (Tilt.tsx): only translate3d is written to these wrappers, straight to the DOM */
 .atmos-tilt { position: absolute; inset: 0; pointer-events: none; will-change: transform; }
 .atmos-tilt-pad { inset: -16px; } /* oversized so a shifted layer never shows its edge; keep >= TILT.lightRange */
