@@ -1,11 +1,13 @@
 "use client"
-import { Suspense, useLayoutEffect, useMemo, useRef, type ComponentRef } from "react"
+import { Suspense, useEffect, useLayoutEffect, useMemo, useRef, type ComponentRef } from "react"
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { MapControls, useTexture } from "@react-three/drei"
 import * as THREE from "three"
-import { MAP } from "@/lib/map"
+import { LOD, LVL2, LVL3, MAP, REVEAL, scaleAtDistance } from "@/lib/map"
+import { useReducedMotion } from "@/lib/useReducedMotion"
 import LAND from "@/public/maps/3d/land-bounds.json" // npm run gen3d
 import Pins from "./Pins"
+import { heightSamplerFor } from "./heightSampler"
 
 // ---- every tunable of the spike (world units: the map is MAP.w/100 x MAP.h/100 = 9.03 x 6.73) ----
 export const LAB3D = {
@@ -51,11 +53,136 @@ export const LAB3D = {
 
 const { w: W, h: H } = LAB3D.map
 const SEA = LAB3D.world * W
-// zoom progress, 0 fully out .. 1 fully in; written by CameraRig every frame, read by the clouds (not React state)
-const view = { t: 0 }
+// Written by CameraRig every frame, read by the clouds and the tier reveal (not React state: a zoom
+// gesture must not re-render). t = zoom progress, 0 fully out .. 1 fully in. s = the same zoom in the 2D
+// map's "scale" units, so LVL2/LVL3 mean the same thing here as they do there. coverS = the scale the
+// opening view sits at. rect = the ground the camera can see, in map uv. target = where it is centred.
+const view = { t: 0, s: 1, coverS: 1, rect: { u0: 0, v0: 0, u1: 1, v1: 1 }, target: { u: 0.5, v: 0.5 } }
+// the gesture's focal point (pinch midpoint / wheel cursor / double tap) in map uv, and when it was taken
+const focal = { u: 0.5, v: 0.5, at: -1e9 }
 const smoothstep = (a: number, b: number, v: number) => {
   const x = Math.min(1, Math.max(0, (v - a) / (b - a)))
   return x * x * (3 - 2 * x)
+}
+
+// ---- the zoom reveal: the terrain and detail tiers soak in over the base as the reader zooms in, through
+// an ink blot spreading from wherever the gesture is pointing. Ported from the 2D map (REVEAL in lib/map.ts,
+// revealOn/revealOff in components/map/MapContent.tsx): same textures, same thresholds, same timings. The
+// difference is that here the blot is sampled in map uv inside the terrain's own shader, so it lands on the
+// ground and is tilted and displaced with it instead of sitting in a flat overlay above it.
+const TIERS = [
+  { map: "/maps/3d/terrain.webp", level: LVL2 }, // mountain and forest masses
+  { map: "/maps/3d/detail.webp", level: LVL3 },  // individual trees, fine ridges and texture
+] as const
+// In landscape the scene opens at a scale just under LVL2, so the terrain tier would fire on the opening
+// nudge of a gesture and read as a glitch rather than a reveal. Hold it this far above the opening view.
+const COVER_HEADROOM = 1.12
+// CSS cubic-bezier easing, as components/map/MapContent.tsx:31 does it: time fraction -> progress
+function cubicBezier([x1, y1, x2, y2]: readonly [number, number, number, number]) {
+  const at = (t: number, a: number, b: number) => 3 * a * t * (1 - t) ** 2 + 3 * b * t * t * (1 - t) + t ** 3
+  return (x: number) => {
+    let lo = 0
+    let hi = 1
+    for (let i = 0; i < 32; i++) {
+      const mid = (lo + hi) / 2
+      if (at(mid, x1, x2) < x) lo = mid
+      else hi = mid
+    }
+    return at((lo + hi) / 2, y1, y2)
+  }
+}
+const spreadEase = cubicBezier(REVEAL.easing)
+
+// The ground the camera can see, in map uv: the four screen corners cast onto the map plane. A corner
+// above the horizon misses the plane and is skipped; if none hit, the whole map stands in. Only used to
+// size the blot, so erring wide is harmless - it just finishes the spread at the edges a little sooner.
+const groundRect = (() => {
+  const ray = new THREE.Raycaster()
+  const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+  const hit = new THREE.Vector3()
+  const ndc = new THREE.Vector2()
+  const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const
+  return (camera: THREE.Camera, out: { u0: number; v0: number; u1: number; v1: number }) => {
+    let u0 = Infinity
+    let v0 = Infinity
+    let u1 = -Infinity
+    let v1 = -Infinity
+    for (const [x, y] of corners) {
+      ndc.set(x, y)
+      ray.setFromCamera(ndc, camera)
+      if (!ray.ray.intersectPlane(plane, hit)) continue
+      const u = Math.min(2, Math.max(-1, hit.x / W + 0.5))
+      const v = Math.min(2, Math.max(-1, hit.z / H + 0.5))
+      u0 = Math.min(u0, u)
+      u1 = Math.max(u1, u)
+      v0 = Math.min(v0, v)
+      v1 = Math.max(v1, v)
+    }
+    out.u0 = u0 === Infinity ? 0 : u0
+    out.v0 = v0 === Infinity ? 0 : v0
+    out.u1 = u1 === -Infinity ? 1 : u1
+    out.v1 = v1 === -Infinity ? 1 : v1
+  }
+})()
+
+// The gesture's focal point, in map uv: the point the ink blot spreads from, as the 2D map takes it from
+// the pinch midpoint / wheel cursor (components/map/MapContent.tsx). Capture-phase and passive, so
+// MapControls' own handlers on the same element are untouched; zoomToCursor is on, so this is also the
+// point the camera dollies toward, and blot and camera agree on their anchor.
+function FocalTracker({ heightAt }: { heightAt: (u: number, v: number) => number }) {
+  const gl = useThree((s) => s.gl)
+  const camera = useThree((s) => s.camera)
+  useEffect(() => {
+    const el = gl.domElement
+    const ray = new THREE.Raycaster()
+    const hit = new THREE.Vector3()
+    const ndc = new THREE.Vector2()
+    const up = new THREE.Vector3(0, 1, 0)
+    const plane = new THREE.Plane(up, 0)
+    const take = (clientX: number, clientY: number) => {
+      const r = el.getBoundingClientRect()
+      if (!r.width || !r.height) return
+      ndc.set(((clientX - r.left) / r.width) * 2 - 1, -(((clientY - r.top) / r.height) * 2 - 1))
+      ray.setFromCamera(ndc, camera)
+      plane.constant = 0
+      if (!ray.ray.intersectPlane(plane, hit)) return
+      // the ground stands up to displacementScale above the sea, so a sea-level hit falls short at tilted
+      // angles: read the height where it landed and cast again at that height
+      const u = hit.x / W + 0.5
+      const v = hit.z / H + 0.5
+      if (u >= 0 && u <= 1 && v >= 0 && v <= 1) {
+        plane.constant = -heightAt(u, v) * LAB3D.displacementScale
+        if (!ray.ray.intersectPlane(plane, hit)) return
+      }
+      focal.u = hit.x / W + 0.5
+      focal.v = hit.z / H + 0.5
+      focal.at = performance.now()
+    }
+    const onWheel = (e: WheelEvent) => take(e.clientX, e.clientY)
+    const onMouse = (e: MouseEvent) => take(e.clientX, e.clientY)
+    const onTouch = (e: TouchEvent) => {
+      if (!e.touches.length) return
+      let x = 0
+      let y = 0
+      for (const t of e.touches) {
+        x += t.clientX
+        y += t.clientY
+      }
+      take(x / e.touches.length, y / e.touches.length) // the pinch midpoint, or the one finger
+    }
+    const opts = { capture: true, passive: true } as const
+    el.addEventListener("wheel", onWheel, opts)
+    el.addEventListener("dblclick", onMouse, opts)
+    el.addEventListener("touchstart", onTouch, opts)
+    el.addEventListener("touchmove", onTouch, opts)
+    return () => {
+      el.removeEventListener("wheel", onWheel, opts)
+      el.removeEventListener("dblclick", onMouse, opts)
+      el.removeEventListener("touchstart", onTouch, opts)
+      el.removeEventListener("touchmove", onTouch, opts)
+    }
+  }, [gl, camera, heightAt])
+  return null
 }
 
 // colour textures in sRGB; the heightmap stays linear
@@ -101,12 +228,144 @@ normal = normalize((viewMatrix * vec4(reliefN, 0.0)).xyz);`,
   }
 }
 
+// The two overlay tiers composited over the base, each gated by its own ink blot. uReveal[i] is the blot's
+// focal point in map uv and its current size in world units; uTierOn fades a tier in and out; uDone latches
+// once a spread has finished, so the tier then shows everywhere (as the 2D version drops its CSS mask).
+const TIER_DECL = `
+uniform sampler2D uTerrain;
+uniform sampler2D uDetail;
+uniform sampler2D uInk;
+uniform vec2 uTierOn;
+uniform vec2 uDone;
+uniform vec3 uReveal[2];
+uniform vec2 uMapSize;
+float tierBlot(vec2 uv, vec3 r) {
+  if (r.z <= 0.0) return 0.0;
+  vec2 p = (uv - r.xy) * uMapSize / r.z + 0.5; // world units, so the blot is round on the ground
+  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) return 0.0;
+  return texture2D(uInk, p).a; // the mask is white + alpha; only the alpha carries the blot
+}`
+const TIER_BLEND = `
+float tierK0 = uTierOn.x * max(tierBlot(vMapUv, uReveal[0]), uDone.x);
+float tierK1 = uTierOn.y * max(tierBlot(vMapUv, uReveal[1]), uDone.y);
+vec4 tierT = texture2D(uTerrain, vMapUv);
+vec4 tierD = texture2D(uDetail, vMapUv);
+diffuseColor.rgb = mix(diffuseColor.rgb, tierT.rgb, tierT.a * tierK0);
+diffuseColor.rgb = mix(diffuseColor.rgb, tierD.rgb, tierD.a * tierK1);`
+
+type Spread = { on: boolean; lit: number; done: number; from: number; to: number; u: number; v: number; start: number }
+
+// Switches each tier at its threshold (hysteresis, as the 2D map's syncTiers does) and runs the spread.
+// The blot grows geometrically from a small blot on the focal point to the size whose solid core covers
+// everything on screen - the same curve the 2D version's keyframes describe.
+function useTierReveal(uniforms: { uTierOn: { value: THREE.Vector2 }; uDone: { value: THREE.Vector2 }; uReveal: { value: THREE.Vector3[] } }) {
+  const invalidate = useThree((s) => s.invalidate)
+  const reduced = useReducedMotion()
+  const spreads = useRef<Spread[]>(TIERS.map(() => ({ on: false, lit: 0, done: 0, from: 0, to: 1, u: 0.5, v: 0.5, start: -1 })))
+  // The canvas is frameloop="demand", so frames stop the moment the camera settles -- and useFrame stops
+  // with them, which means it cannot invalidate its way out of that on its own. While a reveal is running,
+  // this pump asks for frames from outside the render loop; it stops as soon as nothing is animating, so an
+  // idle map still costs nothing.
+  const pumping = useRef(false)
+  const raf = useRef(0)
+  useEffect(() => () => cancelAnimationFrame(raf.current), [])
+  const pump = (busy: boolean) => {
+    pumping.current = busy
+    if (!busy || raf.current) return
+    const tick = () => {
+      invalidate()
+      raf.current = pumping.current ? requestAnimationFrame(tick) : 0
+    }
+    raf.current = requestAnimationFrame(tick)
+  }
+  useFrame((_, delta) => {
+    // a frame after a long idle carries a huge delta; without a cap the fades finish in one step
+    const dt = Math.min(delta, 0.05)
+    const now = performance.now()
+    let busy = false
+    for (let i = 0; i < TIERS.length; i++) {
+      const s = spreads.current[i]
+      // the terrain tier never fires below the opening view; see COVER_HEADROOM
+      const level = i === 0 ? Math.max(TIERS[i].level, view.coverS * COVER_HEADROOM) : TIERS[i].level
+      const want = view.s >= (s.on ? level - LOD.hysteresis : level)
+      if (want !== s.on) {
+        s.on = want
+        if (!want) s.start = -1
+        else if (reduced || s.lit > 0.05) {
+          s.done = 1 // reduced motion, or still fading out from a moment ago: plain fade, no spread
+          s.start = -1
+        } else {
+          // a fresh gesture points the blot; otherwise it starts from the middle of the view
+          const fresh = now - focal.at < REVEAL.focalFreshMs
+          s.u = fresh ? focal.u : view.target.u
+          s.v = fresh ? focal.v : view.target.v
+          const { u0, v0, u1, v1 } = view.rect
+          const reach = Math.max(
+            ...[[u0, v0], [u1, v0], [u0, v1], [u1, v1]].map(([u, v]) => Math.hypot((u - s.u) * W, (v - s.v) * H)),
+          )
+          s.to = (reach / REVEAL.maskCore) * REVEAL.maskScale
+          s.from = Math.min(s.to * 0.9, REVEAL.maskStart * Math.max((u1 - u0) * W, (v1 - v0) * H))
+          s.done = 0
+          s.start = now
+        }
+      }
+      const step = (dt * 1000) / (s.on ? REVEAL.fadeInMs : REVEAL.fadeOutMs)
+      const lit = s.on ? Math.min(1, s.lit + step) : Math.max(0, s.lit - step)
+      if (lit !== s.lit) busy = true
+      s.lit = lit
+      if (!s.on && lit === 0) {
+        s.done = 0 // fully gone: the next switch-on spreads again rather than snapping back
+        uniforms.uReveal.value[i].z = 0
+      }
+      if (s.start >= 0) {
+        const e = spreadEase(Math.min(1, (now - s.start) / REVEAL.spreadMs))
+        uniforms.uReveal.value[i].set(s.u, s.v, s.from * Math.pow(s.to / s.from, e))
+        if (now - s.start >= REVEAL.spreadMs) {
+          s.done = 1
+          s.start = -1
+        }
+        busy = true
+      }
+      uniforms.uTierOn.value.setComponent(i, s.lit)
+      uniforms.uDone.value.setComponent(i, s.done)
+    }
+    pump(busy)
+  })
+}
+
 function Terrain() {
-  const color = useTexture("/maps/3d/color.webp", srgb)
+  const [color, terrain, detail] = useTexture(["/maps/3d/color.webp", "/maps/3d/terrain.webp", "/maps/3d/detail.webp"], srgb)
+  const ink = useTexture(REVEAL.mask)
   const height = useTexture("/maps/3d/height.png")
-  const onBeforeCompile = useMemo(() => reliefNormals(height), [height])
+  const uniforms = useMemo(
+    () => ({
+      uTerrain: { value: terrain },
+      uDetail: { value: detail },
+      uInk: { value: ink },
+      uTierOn: { value: new THREE.Vector2(0, 0) },
+      uDone: { value: new THREE.Vector2(0, 0) },
+      uReveal: { value: [new THREE.Vector3(0.5, 0.5, 0), new THREE.Vector3(0.5, 0.5, 0)] },
+      uMapSize: { value: new THREE.Vector2(W, H) },
+    }),
+    [terrain, detail, ink],
+  )
+  // the relief patch and the tier patch are independent: the first rewrites the normals, the second the
+  // colour. The uniforms live out here rather than inside the callback, so useTierReveal can write to them.
+  const onBeforeCompile = useMemo(() => {
+    const relief = reliefNormals(height)
+    return (shader: THREE.WebGLProgramParametersWithUniforms) => {
+      relief(shader)
+      Object.assign(shader.uniforms, uniforms)
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", `#include <common>\n${TIER_DECL}`)
+        .replace("#include <map_fragment>", `#include <map_fragment>\n${TIER_BLEND}`)
+    }
+  }, [height, uniforms])
+  useTierReveal(uniforms)
+  const heightAt = useMemo(() => heightSamplerFor(height), [height])
   return (
     <>
+      <FocalTracker heightAt={heightAt} />
       <mesh rotation-x={-Math.PI / 2}>
         <planeGeometry args={[W, H, ...LAB3D.segments]} />
         <meshStandardMaterial
@@ -266,6 +525,12 @@ function CameraRig() {
     const d = camera.position.distanceTo(ctl.target)
     const { t, out, pitch, fog } = lim.zoom(d)
     view.t = t
+    // what the tier reveal reads: the zoom in the 2D map's units, and the ground the camera can see
+    view.s = scaleAtDistance(d, LAB3D.fov)
+    view.coverS = scaleAtDistance(lim.dCover, LAB3D.fov)
+    view.target.u = ctl.target.x / W + 0.5
+    view.target.v = ctl.target.z / H + 0.5
+    groundRect(camera, view.rect)
     if (Math.abs(ctl.minPolarAngle - pitch) > 1e-4) {
       ctl.minPolarAngle = ctl.maxPolarAngle = pitch
       ctl.update()

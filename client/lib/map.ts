@@ -8,6 +8,15 @@ export const LVL2 = 1.8
 export const LVL3 = 3.2
 export const LVL4 = 4.2 // deep zoom: the discoveries appear (see DISCOVER)
 
+// The same thresholds in the 3D scene's terms (components/lab3d/Scene.tsx). "scale" in the 2D map means
+// the visible map height is MAP.h / scale; a perspective camera at distance d sees 2 d tan(fov/2) of
+// ground. Equating the two gives the scale a camera distance is worth -- the viewport cancels, so this is
+// a true one-to-one mapping and LVL2/LVL3/LVL4 mean the same thing in both, in any orientation. (Going
+// via the scene's own dCover would not: that depends on the aspect ratio, so a level would fire at a
+// different zoom in landscape than in portrait.)
+export const scaleAtDistance = (d: number, fovDeg: number) =>
+  MAP.h / 100 / (2 * d * Math.tan((fovDeg * Math.PI) / 360))
+
 // Zoom reveals terrain detail: `npm run lod` (scripts/split-lod.mjs) splits the traced map into three
 // tiers by shape size. Terrain fades in at LVL2 and detail at LVL3 (level-triggered CSS fades).
 export const LOD = {
