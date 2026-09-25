@@ -33,10 +33,10 @@ function sampler(image: CanvasImageSource & { width: number; height: number }) {
   }
 }
 
-// small standing wax seal (the tip is the bottom-centre)
+// standing wax seal (the tip is the bottom-centre), 1.5x the viewBox, with a soft drop shadow so it lifts off the art
 function Seal() {
   return (
-    <svg viewBox="0 0 24 34" width={24} height={34} aria-hidden style={{ display: "block", filter: "drop-shadow(0 2px 2px rgba(20,8,2,.45))" }}>
+    <svg viewBox="0 0 24 34" width={36} height={51} aria-hidden style={{ display: "block", filter: "drop-shadow(0 3px 3px rgba(20,8,2,.55))" }}>
       <path d="M7 17 L12 33 L17 17 Z" fill="#3f1d0e" />
       <circle cx="12" cy="11.5" r="10" fill="#3f1d0e" stroke="#9b8066" strokeWidth="0.8" />
       <circle cx="12" cy="11.5" r="6.8" fill="none" stroke="#9b8066" strokeWidth="1" />
@@ -60,7 +60,7 @@ export default function Pins({ heightMap, scale }: { heightMap: THREE.Texture; s
             aria-label={p.name}
             aria-expanded={open === p.id}
             onClick={() => setOpen((o) => (o === p.id ? null : p.id))}
-            className="grid h-11 w-11 cursor-pointer place-items-end justify-items-center"
+            className="grid h-14 w-14 cursor-pointer place-items-end justify-items-center"
           >
             <Seal />
           </button>

@@ -18,15 +18,25 @@ export const LAB3D = {
   seaTilesAcrossMap: 8,      // sea-tile.webp repeats: must match gen-3d (4096px map / 512px tile)
   worldFade: [0.62, 0.98],   // world plane: opaque out to this fraction of its half-size, gone at the second (radial)
   fov: 40,
-  // framing: the land's bounding box (public/maps/3d/land-bounds.json) covers the screen at max zoom-out,
-  // and panning stops where the view would leave it
+  // framing: the start "covers" the screen with the land's bounding box (public/maps/3d/land-bounds.json);
+  // zooming out goes on to "contain": the whole box plus a sea margin in view, slightly tilted so the far sea
+  // recedes into the fog (the world floating in the sea). Panning keeps the view inside the land box at cover
+  // and closer, and the land inside the view at contain.
   minDistance: 1.1,          // max zoom-in
-  pitch: [0.05, 0.85] as const, // rad from straight down: fully zoomed out -> fully zoomed in
+  pitch: [0.05, 0.85] as const, // rad from straight down: at cover -> fully zoomed in
+  containPitch: 0.25,        // rad from straight down at contain (max zoom-out), easing into pitch[0] by cover
+  containMargin: 0.12,       // sea around the land box at contain, x the box's width
   fog: [1.6, 3.2] as const,  // fog near/far, x the camera distance (tilted views fade into the background)
+  containFog: [1.05, 1.15] as const, // the same at contain, easing into fog by cover: the far sea hazes over
   background: "#412511",
-  // together they light flat ground at about the texture's own colour (slightly warm); the low sun raises relief
-  sun: { color: "#fff0de", intensity: 3.9, position: [-7, 3.4, -5] as const }, // top-left of the map, low
-  ambient: { color: "#f7f9ff", intensity: 1.7 },
+  // together they light flat ground at about the texture's own colour (slightly warm); the sun is high (58 deg
+  // up), so slopes turned away shade gently instead of falling into long dark bands. gen-3d's preview mirrors it.
+  sun: { color: "#fff0de", intensity: 1.8, position: [-7, 13.8, -5] as const }, // top-left of the map, high
+  ambient: { color: "#f7f9ff", intensity: 1.61 },
+  // screen-space light over the canvas, ported from the 2D map's ScreenAtmos (components/map/Atmosphere.tsx):
+  // a dark vignette and a warm candle glow from the top-left, plain rgba gradients (static here, no flicker)
+  vignette: 0.5,
+  glow: { color: "255,208,150", opacity: 0.16 },
   cloudOpacity: 0.8,
   cloudFade: [0.3, 0.5] as const, // zoom progress: clouds fade from the first value, gone by the midpoint
   // x/y: fractions of the map (outside 0..1 = over the open sea), y height above the sea, size = width
@@ -173,10 +183,26 @@ function Clouds() {
   )
 }
 
-// MapControls without rotation. Max zoom-out covers the screen with the land's bounding box (the tighter
-// axis fits, the other overflows and pans), recomputed on resize/rotation; the pitch follows the zoom
-// (straight down when out, tilted when in); panning stops where the top-down view would leave the land box
-// (tilted views may still see sea towards the horizon); fog scales with distance.
+// Ground footprint of the view at distance d and pitch (rad from straight down), relative to the target: z of
+// its far (top of the screen) and near (bottom) edges, and its half-width along the near edge, the narrowest.
+// Only for pitch + half the fov < 90 deg (the far edge short of the horizon).
+function footprint(pitch: number, d: number, tan: number, aspect: number) {
+  const a = Math.atan(tan)
+  const c = Math.cos(pitch)
+  const s = Math.sin(pitch)
+  return {
+    far: d * (s - c * Math.tan(pitch + a)),
+    near: d * (s - c * Math.tan(pitch - a)),
+    halfWidth: (d * c * Math.cos(a) * tan * aspect) / Math.cos(pitch - a),
+  }
+}
+
+// MapControls without rotation. The zoom runs from contain (max zoom-out: the land box plus a sea margin
+// inside the tilted view) through cover (the start: the land box covers the top-down view, the tighter axis
+// fits and the other overflows and pans) to minDistance, recomputed on resize/rotation. The pitch follows the
+// zoom (slightly tilted at contain, straight down at cover, tilted when in), and so does the fog. Panning at
+// cover and closer stops where the top-down view would leave the land box (tilted views may still see sea
+// towards the horizon); at contain it stops where the land would leave the view; the limits blend between.
 function CameraRig() {
   const controls = useRef<ComponentRef<typeof MapControls>>(null)
   const camera = useThree((s) => s.camera)
@@ -189,26 +215,42 @@ function CameraRig() {
     const aspect = size.width / Math.max(1, size.height)
     const { x0, x1, z0, z1 } = LAND.world
     // cover: the view (top-down, 2 d tan x 2 d tan aspect) fits inside the land box on both axes
-    const dMax = Math.min((z1 - z0) / (2 * tan), (x1 - x0) / (2 * tan * aspect))
-    return { x0, x1, z0, z1, cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, tan, aspect, dMax: Math.max(LAB3D.minDistance * 1.5, dMax) }
+    const dCover = Math.max(LAB3D.minDistance * 1.5, Math.min((z1 - z0) / (2 * tan), (x1 - x0) / (2 * tan * aspect)))
+    // contain: the land box plus the margin fits inside the view at containPitch on both axes
+    const m = LAB3D.containMargin * (x1 - x0)
+    const f = footprint(LAB3D.containPitch, 1, tan, aspect)
+    const dContain = Math.max(dCover * 1.05, (z1 - z0 + 2 * m) / (f.near - f.far), (x1 - x0 + 2 * m) / (2 * f.halfWidth))
+    // zoom state at camera distance d: t = 0 at cover .. 1 fully in (the clouds read it), out = 0 at cover ..
+    // 1 at contain. The pitch and the fog ease from their contain values into their cover values (flat there),
+    // then the pitch follows the in-curve.
+    const zoom = (d: number) => {
+      const t = Math.min(1, Math.max(0, Math.log(dCover / d) / Math.log(dCover / LAB3D.minDistance)))
+      const out = Math.min(1, Math.max(0, Math.log(d / dCover) / Math.log(dContain / dCover)))
+      const e = smoothstep(0, 1, out)
+      const pitch = LAB3D.pitch[0] + (LAB3D.pitch[1] - LAB3D.pitch[0]) * t + (LAB3D.containPitch - LAB3D.pitch[0]) * e
+      const fog = LAB3D.fog.map((v, i) => v + (LAB3D.containFog[i] - v) * e)
+      return { t, out, pitch, fog }
+    }
+    return { x0, x1, z0, z1, cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, tan, aspect, dCover, dContain, zoom }
   }, [size.width, size.height])
 
   useLayoutEffect(() => {
     const ctl = controls.current
     if (!ctl) return
     if (placed.current) {
-      // resized / rotated: maxDistance has the new cover distance; update() pulls the camera in if needed
+      // resized / rotated: maxDistance has the new contain distance; update() pulls the camera in if needed
       ctl.update()
       invalidate()
       return
     }
     placed.current = true
-    // start fully zoomed out, centred on the land (?zoom=0..1 and ?at=x,y in map % pick another start)
+    // start at cover, centred on the land (?zoom=-1..1 and ?at=x,y in map % pick another start: -1 = contain,
+    // 0 = cover, 1 = fully in)
     const q = new URLSearchParams(window.location.search)
-    const t = Math.min(1, Math.max(0, Number(q.get("zoom") ?? 0) || 0))
+    const z = Math.min(1, Math.max(-1, Number(q.get("zoom") ?? 0) || 0))
     const at = q.get("at")?.split(",").map(Number)
-    const d = lim.dMax * Math.pow(LAB3D.minDistance / lim.dMax, t)
-    const pitch = LAB3D.pitch[0] + (LAB3D.pitch[1] - LAB3D.pitch[0]) * t
+    const d = lim.dCover * Math.pow(z < 0 ? lim.dContain / lim.dCover : LAB3D.minDistance / lim.dCover, Math.abs(z))
+    const { pitch } = lim.zoom(d)
     const tx = at && at.length === 2 ? (at[0] / 100 - 0.5) * W : lim.cx
     const tz = at && at.length === 2 ? (at[1] / 100 - 0.5) * H : lim.cz
     ctl.target.set(tx, 0, tz)
@@ -222,20 +264,29 @@ function CameraRig() {
     const ctl = controls.current
     if (!ctl) return
     const d = camera.position.distanceTo(ctl.target)
-    const t = Math.min(1, Math.max(0, Math.log(lim.dMax / d) / Math.log(lim.dMax / LAB3D.minDistance)))
+    const { t, out, pitch, fog } = lim.zoom(d)
     view.t = t
-    const pitch = LAB3D.pitch[0] + (LAB3D.pitch[1] - LAB3D.pitch[0]) * t
     if (Math.abs(ctl.minPolarAngle - pitch) > 1e-4) {
       ctl.minPolarAngle = ctl.maxPolarAngle = pitch
       ctl.update()
     }
-    // pan limit: the top-down view at this distance (half extents d tan, d tan aspect) stays inside the land box
+    // pan limit: the target's range on each axis (a range that doesn't fit collapses to its middle). At cover
+    // and closer the top-down view at this distance (half extents d tan, d tan aspect) stays inside the land box...
+    const range = (lo: number, hi: number) => (lo > hi ? [(lo + hi) / 2, (lo + hi) / 2] : [lo, hi])
     const hz = d * lim.tan
     const hx = hz * lim.aspect
-    const keepIn = (v: number, lo: number, hi: number, half: number) =>
-      lo + half >= hi - half ? (lo + hi) / 2 : Math.min(hi - half, Math.max(lo + half, v))
-    const tx = keepIn(ctl.target.x, lim.x0, lim.x1, hx)
-    const tz = keepIn(ctl.target.z, lim.z0, lim.z1, hz)
+    let rx = range(lim.x0 + hx, lim.x1 - hx)
+    let rz = range(lim.z0 + hz, lim.z1 - hz)
+    if (out > 0) {
+      // ...at contain the land box stays inside the tilted view, with the view's centre over the land
+      const f = footprint(pitch, d, lim.tan, lim.aspect)
+      const cx = range(Math.max(lim.x0, lim.x1 - f.halfWidth), Math.min(lim.x1, lim.x0 + f.halfWidth))
+      const cz = range(Math.max(lim.z0, lim.z1 - f.near), Math.min(lim.z1, lim.z0 - f.far))
+      rx = rx.map((v, i) => v + (cx[i] - v) * out)
+      rz = rz.map((v, i) => v + (cz[i] - v) * out)
+    }
+    const tx = Math.min(rx[1], Math.max(rx[0], ctl.target.x))
+    const tz = Math.min(rz[1], Math.max(rz[0], ctl.target.z))
     if (tx !== ctl.target.x || tz !== ctl.target.z) {
       const dx = tx - ctl.target.x
       const dz = tz - ctl.target.z
@@ -245,8 +296,8 @@ function CameraRig() {
       camera.position.z += dz
     }
     if (scene.fog instanceof THREE.Fog) {
-      scene.fog.near = d * LAB3D.fog[0]
-      scene.fog.far = d * LAB3D.fog[1]
+      scene.fog.near = d * fog[0]
+      scene.fog.far = d * fog[1]
     }
   })
 
@@ -259,7 +310,7 @@ function CameraRig() {
       dampingFactor={0.12}
       zoomToCursor
       minDistance={LAB3D.minDistance}
-      maxDistance={lim.dMax}
+      maxDistance={lim.dContain}
     />
   )
 }
@@ -284,12 +335,29 @@ export default function Scene() {
         </Suspense>
         <CameraRig />
       </Canvas>
-      {/* replaces the removed title cartouche */}
+      {/* screen-space light (over the canvas, under the pins and the title) */}
       <div
-        className="pointer-events-none absolute inset-x-0 z-10 text-center font-serif text-xl tracking-[0.18em] text-[#f4efcf] sm:text-2xl"
-        style={{ top: "calc(14px + env(safe-area-inset-top))", textShadow: "0 1px 8px rgba(20,8,2,.7)" }}
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{ backgroundImage: `radial-gradient(ellipse at center, rgba(20,8,2,0) 55%, rgba(20,8,2,${LAB3D.vignette}) 100%)` }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{ backgroundImage: `radial-gradient(ellipse at 0% 0%, rgba(${LAB3D.glow.color},${LAB3D.glow.opacity}) 0%, rgba(${LAB3D.glow.color},0) 65%)` }}
+      />
+      {/* replaces the removed title cartouche: a dark pill, readable over any part of the map (the tracking
+          also trails the last letter, so the extra left padding re-centres the text) */}
+      <div
+        className="pointer-events-none absolute inset-x-0 z-10 flex justify-center"
+        style={{ top: "calc(12px + env(safe-area-inset-top))" }}
       >
-        Protheka · 408 DE
+        <div
+          className="rounded-full border border-[#9b8066]/60 bg-[#3f1d0e]/90 font-serif text-xl tracking-[0.18em] text-[#f4efcf] shadow-[0_2px_10px_rgba(20,8,2,.45)] sm:text-2xl"
+          style={{ padding: "0.15em 0.8em 0.15em calc(0.8em + 0.18em)" }}
+        >
+          Protheka · 408 DE
+        </div>
       </div>
     </div>
   )
