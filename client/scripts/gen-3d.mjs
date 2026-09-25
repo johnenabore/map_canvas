@@ -1,7 +1,8 @@
 // Textures for the /lab/3d spike, rendered from the three LOD tiers with sharp (as in scripts/raster.mjs).
 // Usage: npm run gen3d -> public/maps/3d/ (+ the preview in lab3d-preview/)
 //   color.webp          base+terrain+detail at 4096px, the title/legend band and the frame replaced by open
-//                       sea, land along the old frame edges dissolving into mist (the compass stays)
+//                       sea, land along the old frame edges dissolving into mist (the compass stays); the
+//                       open sea inside gets the sea tile's wave marks, faint, so it isn't flat and empty
 //   sea-tile.webp       seamless sea (parchment tone + faint ink wave marks) for the world plane around the
 //                       map; the same tile is painted into color.webp's sea margin on the same grid, so the
 //                       two meet without a seam
@@ -43,9 +44,12 @@ const CFG = {
   reliefBlur: 24,      // gaussian sigma, px at 1024 (in float, so no 8-bit terraces)
   tile: 512,           // sea tile, px; 8 tiles across the 4096px map, so the scene can line the world plane up
   waves: 26,           // ink wave marks per tile
-  // the hillshade in the preview mimics the scene's shader normals: LAB3D.displacementScale and
-  // LAB3D.reliefExaggeration in components/lab3d/Scene.tsx
-  preview: { displacement: 0.12, exaggeration: 3.5, sun: [-7, 3.4, -5] },
+  seaMarks: 0.6,       // the tile's wave marks on the open sea inside the map, at this x their opacity (faint)
+  marksClear: 5,       // px at 1024: they fade out over this towards anything drawn on the sea (coast, lettering)
+  // the hillshade in the preview mimics the scene's shader normals and lights: LAB3D.displacementScale,
+  // LAB3D.reliefExaggeration and LAB3D.sun.position in components/lab3d/Scene.tsx; ambient = the ambient
+  // light's share of flat ground's light (LAB3D.ambient.intensity / (that + sun intensity x its height))
+  preview: { displacement: 0.12, exaggeration: 3.5, sun: [-7, 13.8, -5], ambient: 0.51 },
 }
 // open-sea sample boxes (fractions of w/h), for the sea colour and as flood-fill seeds
 const SEA = [[0.18, 0.56, 0.3, 0.64], [0.33, 0.57, 0.39, 0.62], [0.79, 0.73, 0.91, 0.79], [0.59, 0.745, 0.68, 0.79], [0.05, 0.36, 0.1, 0.43]]
@@ -102,9 +106,11 @@ function lattice(nx, ny, seed, periodic) {
   }
 }
 
-// ---------- seamless sea tile: sea tone, soft mottling, faint ink wave marks (drawn with wrap-around)
+// ---------- seamless sea tile: sea tone, soft mottling, faint ink wave marks (drawn with wrap-around); the
+// marks' alpha (tileInk, RGBA) is kept for the open sea inside the map
 const T = CFG.tile
-const tile = await (async () => {
+const INK = [63, 29, 14]
+const [tile, tileInk] = await (async () => {
   const rnd = mulberry32(408)
   let marks = ""
   for (let k = 0; k < CFG.waves; k++) {
@@ -126,7 +132,7 @@ const tile = await (async () => {
       const m = 1 + 0.03 * n1(x / T, y / T) + 0.012 * n2(x / T, y / T)
       const i = y * T + x
       const al = ink[i * 4 + 3] / 255
-      for (let c = 0; c < 3; c++) px[i * 3 + c] = sea[c] * m * (1 - al) + [63, 29, 14][c] * al
+      for (let c = 0; c < 3; c++) px[i * 3 + c] = sea[c] * m * (1 - al) + INK[c] * al
     }
   // keep the tile's average exactly on the sea colour, so map and world sea match in tone
   for (let c = 0; c < 3; c++) {
@@ -135,7 +141,7 @@ const tile = await (async () => {
     const shift = sea[c] - s / (T * T)
     for (let i = 0; i < T * T; i++) px[i * 3 + c] += shift
   }
-  return px
+  return [px, ink]
 })()
 await mkdir(outDir, { recursive: true })
 await sharp(Buffer.from(tile.map((v) => Math.max(0, Math.min(255, Math.round(v))))), { raw: { width: T, height: T, channels: 3 } })
@@ -157,33 +163,12 @@ function keep(u, t) {
   return Math.max(inside < 0 ? 0 : k, compassK(u, t))
 }
 
-// ---------- color.webp: map where k = 1, sea tile (same grid as the world plane) where k = 0, mist between
-{
-  const mistNoise = lattice(60, Math.round(60 * aspect), 19, false)
-  const out = Buffer.alloc(W * H * 3)
-  for (let y = 0; y < H; y++) {
-    const t = y / (H - 1)
-    for (let x = 0; x < W; x++) {
-      const u = x / (W - 1)
-      const k = keep(u, t)
-      const i = (y * W + x) * 3
-      const ti = ((y % T) * T + (x % T)) * 3
-      const mist = CFG.mist * 4 * k * (1 - k) * (0.65 + 0.35 * mistNoise(u, t))
-      for (let c = 0; c < 3; c++) {
-        const v = tile[ti + c] * (1 - k) + big.data[i + c] * k
-        out[i + c] = Math.max(0, Math.min(255, Math.round(v + (255 - v) * mist * 0.5)))
-      }
-    }
-  }
-  const info = await sharp(out, { raw: { width: W, height: H, channels: 3 } }).webp({ quality: CFG.quality }).toFile(outDir + "color.webp")
-  console.log(`color.webp ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB`)
-}
-
 // ---------- land mask: flood-fill the sea from open-sea seeds over sea-coloured pixels, inside the old
 // frame only (land cut off by the frame then stays land); what the sea doesn't reach is land, except
-// pockets that are mostly cream (lettering on the sea) or tiny
+// pockets that are mostly cream (lettering on the sea) or tiny. openSea = what the fill reached.
 const N = w * h
 const isSea = new Uint8Array(N)
+const openSea = new Uint8Array(N)
 {
   const x0 = Math.ceil(CFG.frame * w)
   const x1 = Math.floor((1 - CFG.frame) * w)
@@ -215,6 +200,7 @@ const isSea = new Uint8Array(N)
       }
     }
   }
+  openSea.set(isSea)
   // outside the old frame interior counts as sea too
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (!inRect(x, y)) isSea[y * w + x] = 1
   // pockets of "land" enclosed by sea: lettering or specks go back to sea
@@ -254,6 +240,63 @@ const isSea = new Uint8Array(N)
   console.log(`land mask: ${((landPx / N) * 100).toFixed(1)}% of the map is land (${relabelled} lettering/speck pockets returned to sea)`)
 }
 
+// chamfer distance (3-4, two passes) in px x 3, in place: each entry becomes its distance to the nearest
+// entry that starts at 0 (start the others at 1e9)
+function chamfer(dist) {
+  for (const [ys, dir] of [[0, 1], [h - 1, -1]])
+    for (let y = ys; y >= 0 && y < h; y += dir)
+      for (let x = dir > 0 ? 0 : w - 1; x >= 0 && x < w; x += dir) {
+        const p = y * w + x
+        if (!dist[p]) continue
+        for (const [dx, dy, c] of [[-dir, 0, 3], [-dir, -dir, 4], [0, -dir, 3], [dir, -dir, 4]]) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx >= 0 && ny >= 0 && nx < w && ny < h) dist[p] = Math.min(dist[p], dist[ny * w + nx] + c)
+        }
+      }
+  return dist
+}
+
+// ---------- color.webp: map where k = 1, sea tile (same grid as the world plane) where k = 0, mist between;
+// on the open sea inside, the tile's wave marks at CFG.seaMarks x their opacity, fading out over
+// CFG.marksClear towards anything that isn't open sea (so they never touch a coast or a letter)
+{
+  const clear = Float32Array.from(chamfer(Float32Array.from(openSea, (s) => (s ? 1e9 : 0))), (v) => smooth(v / 3 / CFG.marksClear))
+  const marksAt = (u, t) => { // bilinear, u and t fractions of the map
+    const x = u * (w - 1)
+    const y = t * (h - 1)
+    const x0 = Math.floor(x)
+    const y0 = Math.floor(y)
+    const x1 = Math.min(w - 1, x0 + 1)
+    const y1 = Math.min(h - 1, y0 + 1)
+    const fx = x - x0
+    const fy = y - y0
+    const top = clear[y0 * w + x0] * (1 - fx) + clear[y0 * w + x1] * fx
+    const bottom = clear[y1 * w + x0] * (1 - fx) + clear[y1 * w + x1] * fx
+    return top * (1 - fy) + bottom * fy
+  }
+  const mistNoise = lattice(60, Math.round(60 * aspect), 19, false)
+  const out = Buffer.alloc(W * H * 3)
+  for (let y = 0; y < H; y++) {
+    const t = y / (H - 1)
+    for (let x = 0; x < W; x++) {
+      const u = x / (W - 1)
+      const k = keep(u, t)
+      const i = (y * W + x) * 3
+      const tp = (y % T) * T + (x % T)
+      const ink = tileInk[tp * 4 + 3]
+      const a = ink && k > 0 ? (ink / 255) * CFG.seaMarks * marksAt(u, t) : 0
+      const mist = CFG.mist * 4 * k * (1 - k) * (0.65 + 0.35 * mistNoise(u, t))
+      for (let c = 0; c < 3; c++) {
+        const v = tile[tp * 3 + c] * (1 - k) + (big.data[i + c] * (1 - a) + INK[c] * a) * k
+        out[i + c] = Math.max(0, Math.min(255, Math.round(v + (255 - v) * mist * 0.5)))
+      }
+    }
+  }
+  const info = await sharp(out, { raw: { width: W, height: H, channels: 3 } }).webp({ quality: CFG.quality }).toFile(outDir + "color.webp")
+  console.log(`color.webp ${info.width}x${info.height}, ${(info.size / 1024).toFixed(0)} KiB`)
+}
+
 // ---------- height: relief from the terrain+detail coverage (blurred in float), on a land plateau that rises
 // from the coast over a smooth ramp (distance into the land), so the sea stays exactly 0 and the coast step
 // is soft
@@ -291,19 +334,8 @@ const coverage = gaussian(Float32Array.from(alpha, (a) => a / 255), CFG.reliefBl
 const onLand = Array.from(coverage).filter((_, p) => !isSea[p]).sort((a, b) => a - b)
 const lo = onLand[Math.floor(onLand.length * 0.05)]
 const peak = Math.max(lo + 1e-3, onLand[Math.floor(onLand.length * 0.995)])
-// distance into the land, px x 3 (chamfer 3-4, two passes)
-const dist = Float32Array.from(isSea, (s) => (s ? 0 : 1e9))
-for (const [ys, dir] of [[0, 1], [h - 1, -1]])
-  for (let y = ys; y >= 0 && y < h; y += dir)
-    for (let x = dir > 0 ? 0 : w - 1; x >= 0 && x < w; x += dir) {
-      const p = y * w + x
-      if (!dist[p]) continue
-      for (const [dx, dy, c] of [[-dir, 0, 3], [-dir, -dir, 4], [0, -dir, 3], [dir, -dir, 4]]) {
-        const nx = x + dx
-        const ny = y + dy
-        if (nx >= 0 && ny >= 0 && nx < w && ny < h) dist[p] = Math.min(dist[p], dist[ny * w + nx] + c)
-      }
-    }
+// distance into the land, px x 3
+const dist = chamfer(Float32Array.from(isSea, (s) => (s ? 0 : 1e9)))
 // the ramps, blurred so the chamfer distance's straight creases (its medial axis) don't show in the shading
 const rampAt = (len, sigma) => gaussian(Float32Array.from(dist, (v, p) => (isSea[p] ? 0 : smooth(v / 3 / len))), sigma)
 const plateauRamp = rampAt(CFG.coastRamp, 3)
@@ -381,7 +413,7 @@ await writeFile(outDir + "land-bounds.json", JSON.stringify(bounds, null, 2) + "
       const o = (y * w * 2 + x) * 3
       out[o] = out[o + 1] = out[o + 2] = g
       const q = (y * w * 2 + w + x) * 3
-      for (let c = 0; c < 3; c++) out[q + c] = Math.min(255, Math.round(colorSmall[p * 3 + c] * (0.55 + 0.45 * shade)))
+      for (let c = 0; c < 3; c++) out[q + c] = Math.min(255, Math.round(colorSmall[p * 3 + c] * (P.ambient + (1 - P.ambient) * shade)))
     }
   await mkdir(previewDir, { recursive: true })
   await sharp(out, { raw: { width: w * 2, height: h, channels: 3 } }).png().toFile(previewDir + "preview-height.png")

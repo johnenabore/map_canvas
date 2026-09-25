@@ -176,7 +176,7 @@ export const POIS: POI[] = [
       "On still nights the well hums a single low note, and the dogs of the nearby farms refuse to sleep.",
     chapters: ["The Humming", "What the Rope Brought Up"],
     x: 30,
-    y: 64,
+    y: 73,
     minLevel: 3,
     storyId: "ch3",
   },
