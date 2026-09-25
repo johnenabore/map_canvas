@@ -1,0 +1,179 @@
+@import "tailwindcss";
+
+.map .layer {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none; user-select: none;
+}
+.map .poi { transition: opacity .25s; }
+/* KeepScale's wrapper div rewrites its transform every zoom frame; give it its
+   own GPU layer so that doesn't repaint the map layer underneath */
+.map .poi > div { will-change: transform; }
+
+/* hide pins until their zoom level is reached */
+.map[data-lvl="1"] .poi[data-min="2"],
+.map[data-lvl="1"] .poi[data-min="3"],
+.map[data-lvl="2"] .poi[data-min="3"] {
+  opacity: 0; pointer-events: none;
+}
+/* ---- atmosphere (components/map/Atmosphere.tsx, Clouds.tsx; tunables in lib/map.ts ATMOS) ---- */
+
+/* map-space: paper + edges are not promoted; they live in the content layer's raster */
+.map .atmos-paper { mix-blend-mode: multiply; background-repeat: repeat; }
+.map .atmos-shadows { overflow: hidden; } /* clip the drift to the map */
+.map .atmos-shadow {
+  position: absolute; aspect-ratio: 1;
+  background-size: 100% 100%;
+  will-change: transform; /* own layer: the drift runs on the compositor, no repaint */
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.atmos-drift-1 { animation-name: atmos-drift-1; }
+.atmos-drift-2 { animation-name: atmos-drift-2; }
+.atmos-drift-3 { animation-name: atmos-drift-3; }
+@keyframes atmos-drift-1 { from { transform: translate3d(-35%, -10%, 0); } to { transform: translate3d(35%, 10%, 0); } }
+@keyframes atmos-drift-2 { from { transform: translate3d(30%, -12%, 0); } to { transform: translate3d(-30%, 12%, 0); } }
+@keyframes atmos-drift-3 { from { transform: translate3d(-25%, 15%, 0); } to { transform: translate3d(25%, -15%, 0); } }
+
+/* volcano smoke (Atmosphere.tsx; AMBIENT.volcano/smoke): the box's bottom-centre sits on the plume */
+.map .atmos-smoke {
+  position: absolute; aspect-ratio: 2 / 3;
+  translate: -50% -100%;
+  pointer-events: none;
+}
+.map .atmos-wisp {
+  position: absolute; inset: 0;
+  background-size: 100% 100%;
+  transform-origin: 50% 100%;
+  opacity: 0;
+  will-change: transform, opacity; /* own layer: rise/drift/grow/fade run on the compositor */
+  animation-timing-function: ease-out;
+  animation-iteration-count: infinite;
+}
+.atmos-wisp-1 { animation-name: atmos-wisp-1; }
+.atmos-wisp-2 { animation-name: atmos-wisp-2; }
+/* two variants fan the plume out: -1 leans hard right with the wind, -2 rises more upright */
+@keyframes atmos-wisp-1 {
+  0%   { transform: translate3d(0, 0, 0) scale(0.6); opacity: 0; }
+  15%  { opacity: 1; }
+  55%  { transform: translate3d(18%, -16%, 0) scale(1.1); opacity: 0.75; }
+  100% { transform: translate3d(50%, -30%, 0) scale(1.6); opacity: 0; }
+}
+@keyframes atmos-wisp-2 {
+  0%   { transform: translate3d(0, 0, 0) scale(0.55); opacity: 0; }
+  18%  { opacity: 1; }
+  50%  { transform: translate3d(6%, -15%, 0) scale(1.05); opacity: 0.8; }
+  100% { transform: translate3d(20%, -34%, 0) scale(1.6); opacity: 0; }
+}
+
+/* birds (Birds.tsx): full-map tracks so translate % = % of the map; x crosses linearly, y arcs */
+.map .atmos-birds { overflow: hidden; } /* .layer: clip the flock to the map */
+.atmos-birds-track { position: absolute; inset: 0; }
+.atmos-birds-x {
+  will-change: transform, opacity;
+  animation: atmos-birds-x linear 1 both;
+}
+.atmos-birds-y {
+  will-change: transform;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: 1;
+  animation-fill-mode: both;
+}
+.atmos-birds-arc-1 { animation-name: atmos-birds-arc-1; }
+.atmos-birds-arc-2 { animation-name: atmos-birds-arc-2; }
+.atmos-birds-arc-3 { animation-name: atmos-birds-arc-3; }
+.atmos-flock { position: absolute; left: 0; width: 7%; aspect-ratio: 2 / 1; }
+.atmos-bird {
+  position: absolute; aspect-ratio: 12 / 5;
+  transform-origin: 50% 65%;
+  will-change: transform;
+  animation: atmos-flap ease-in-out infinite;
+}
+@keyframes atmos-birds-x {
+  0%   { transform: translate3d(-10%, 0, 0); opacity: 0; }
+  6%   { opacity: 1; }
+  94%  { opacity: 1; }
+  100% { transform: translate3d(104%, 0, 0); opacity: 0; }
+}
+@keyframes atmos-birds-arc-1 { 0% { transform: translate3d(0, 0, 0); } 50% { transform: translate3d(0, -7%, 0); } 100% { transform: translate3d(0, -2%, 0); } }
+@keyframes atmos-birds-arc-2 { 0% { transform: translate3d(0, 0, 0); } 50% { transform: translate3d(0, 6%, 0); } 100% { transform: translate3d(0, 1%, 0); } }
+@keyframes atmos-birds-arc-3 { 0% { transform: translate3d(0, 0, 0); } 33% { transform: translate3d(0, -5%, 0); } 66% { transform: translate3d(0, 3%, 0); } 100% { transform: translate3d(0, -2%, 0); } }
+@keyframes atmos-flap { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(-0.45); } }
+
+/* screen-space: pre-promoted so they're rasterized once, not created mid-gesture when the content layer gets promoted */
+.atmos-screen { position: absolute; inset: 0; pointer-events: none; will-change: transform; }
+/* depth tilt (Tilt.tsx): only translate3d is written to these wrappers, straight to the DOM */
+.atmos-tilt { position: absolute; inset: 0; pointer-events: none; will-change: transform; }
+.atmos-tilt-pad { inset: -16px; } /* oversized so a shifted layer never shows its edge; keep >= TILT.lightRange */
+/* no overflow clip here: it would move with the tilt wrapper and cut the edge-hugging clouds along a
+   visible line; .map-shell (overflow hidden, never moves) clips them instead */
+.atmos-clouds {
+  position: absolute; inset: 0; pointer-events: none;
+  visibility: hidden; /* Clouds.tsx shows it after the first layout */
+  will-change: opacity;
+}
+.atmos-cloud {
+  position: absolute; left: 0; top: 0;
+  background-size: 100% 100%;
+  will-change: transform;
+}
+/* intro: dark veil over the map, under the clouds; Intro.tsx shows it only when the intro plays */
+.atmos-intro-veil {
+  position: absolute; inset: 0; pointer-events: none;
+  visibility: hidden;
+  will-change: opacity;
+}
+
+/* candle flicker (ScreenAtmos): four nested opacity loops on the vignette multiply. a/b/c are slow,
+   unrelated "breathing" periods; d is a fast irregular loop of short dips (the flame catching). Each
+   loop's deepest dip is its weight x --flicker, weights .45 + .25 + .15 + .15 = 1, so together the
+   shadows ease back by up to ~--flicker (AMBIENT.flicker) as the flame flares */
+.atmos-flicker {
+  position: absolute; inset: 0; pointer-events: none;
+  will-change: opacity; /* keep the effect nodes stable when the animation pauses/resumes */
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.atmos-flicker-a { animation-name: atmos-flicker-a; animation-duration: 3.7s; }
+.atmos-flicker-b { animation-name: atmos-flicker-b; animation-duration: 5.3s; }
+.atmos-flicker-d { animation-name: atmos-flicker-d; animation-duration: 0.9s; }
+.atmos-flicker-c { animation-name: atmos-flicker-c; animation-duration: 2.3s; will-change: transform, opacity; } /* holds the gradient: pre-promoted */
+@keyframes atmos-flicker-a { /* weight .45 */
+  0% { opacity: 1; } 13% { opacity: calc(1 - var(--flicker) * 0.27); } 27% { opacity: calc(1 - var(--flicker) * 0.09); }
+  41% { opacity: calc(1 - var(--flicker) * 0.45); } 58% { opacity: calc(1 - var(--flicker) * 0.16); }
+  72% { opacity: calc(1 - var(--flicker) * 0.36); } 86% { opacity: calc(1 - var(--flicker) * 0.07); } 100% { opacity: 1; }
+}
+@keyframes atmos-flicker-b { /* weight .25 */
+  0% { opacity: calc(1 - var(--flicker) * 0.08); } 19% { opacity: calc(1 - var(--flicker) * 0.23); }
+  34% { opacity: calc(1 - var(--flicker) * 0.03); } 52% { opacity: calc(1 - var(--flicker) * 0.18); }
+  69% { opacity: calc(1 - var(--flicker) * 0.1); } 83% { opacity: calc(1 - var(--flicker) * 0.25); }
+  100% { opacity: calc(1 - var(--flicker) * 0.08); }
+}
+@keyframes atmos-flicker-c { /* weight .15 */
+  0% { opacity: calc(1 - var(--flicker) * 0.08); } 22% { opacity: 1; } 45% { opacity: calc(1 - var(--flicker) * 0.12); }
+  61% { opacity: calc(1 - var(--flicker) * 0.05); } 80% { opacity: calc(1 - var(--flicker) * 0.15); }
+  100% { opacity: calc(1 - var(--flicker) * 0.08); }
+}
+@keyframes atmos-flicker-d { /* weight .15, fast: mostly steady with short sharp catches */
+  0% { opacity: 1; } 18% { opacity: 1; } 24% { opacity: calc(1 - var(--flicker) * 0.15); } 31% { opacity: 1; }
+  55% { opacity: calc(1 - var(--flicker) * 0.04); } 67% { opacity: calc(1 - var(--flicker) * 0.12); }
+  72% { opacity: 1; } 88% { opacity: calc(1 - var(--flicker) * 0.06); } 100% { opacity: 1; }
+}
+
+/* all ambient motion pauses while the user moves (.moving: MapContent's will-change debounce) and while
+   the tab is hidden (.tab-hidden: MapShell), both on the .map-shell root */
+.map-shell:is(.moving, .tab-hidden) :is(.atmos-shadow, .atmos-wisp, .atmos-birds-x, .atmos-birds-y, .atmos-bird, .atmos-flicker) {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .map .poi { transition: none; }
+  /* no ambient motion; the zoom-driven cloud fade stays (user-driven) */
+  .map .atmos-shadow { animation: none; }
+  .map .atmos-wisp { animation: none; }
+  .map .atmos-wisp:first-child { opacity: 0.8; transform: translate3d(8%, -8%, 0) scale(0.85); } /* one still wisp */
+  .map .atmos-birds { display: none; }
+  .map-shell .atmos-flicker { animation: none; }
+}
