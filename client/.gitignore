@@ -42,3 +42,6 @@ next-env.d.ts
 
 # level-of-detail preview renders (npm run lod)
 /lod-preview/
+
+# 3d spike screenshots (lab/3d)
+/lab3d-preview/
