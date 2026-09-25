@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# level-of-detail preview renders (npm run lod)
+/lod-preview/

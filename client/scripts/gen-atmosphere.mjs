@@ -174,6 +174,32 @@ function wispSvg(seed) {
 </svg>`
 }
 
+// ink-blot mask for the zoom reveal (512x512, white + alpha; only the alpha is used as a CSS mask):
+// a soft disc warped by low-frequency turbulence into an irregular blot, a finer displacement for a
+// ragged fringe, then a soft alpha threshold. The solid core radius is measured after rendering and
+// reported (REVEAL.maskCore in lib/map.ts), so the reveal knows how big the blot must get to cover the map.
+function inkMaskSvg() {
+  const s = 512
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}">
+  <defs>
+    <radialGradient id="r">
+      <stop offset="0" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.7" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="k" ${filterAttrs(s, s)}>
+      <feTurbulence type="fractalNoise" baseFrequency="0.011" numOctaves="3" seed="5" result="warp"/>
+      <feDisplacementMap in="SourceGraphic" in2="warp" scale="70" xChannelSelector="R" yChannelSelector="G" result="blob"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.07" numOctaves="2" seed="9" result="grain"/>
+      <feDisplacementMap in="blob" in2="grain" scale="16" xChannelSelector="R" yChannelSelector="G"/>
+      <feComponentTransfer><feFuncA type="linear" slope="2.6" intercept="-0.9"/></feComponentTransfer>
+      <feGaussianBlur stdDeviation="1.5"/>
+    </filter>
+  </defs>
+  <circle cx="${s / 2}" cy="${s / 2}" r="210" fill="url(#r)" filter="url(#k)"/>
+</svg>`
+}
+
 // [cx, cy, rx, ry] per blob; kept well inside the canvas so alpha reaches 0 before the edge
 const CLOUDS = [
   { seed: 3, blobs: [[180, 170, 130, 80], [300, 150, 140, 90], [390, 185, 90, 60]] },
@@ -193,6 +219,7 @@ const jobs = [
   ...CLOUDS.map((c, i) => ({ name: `cloud-${i + 1}.webp`, svg: cloudSvg(c.seed, c.blobs), webp: { quality: 70, alphaQuality: 100, effort: 6 } })),
   ...SHADOWS.map((c, i) => ({ name: `shadow-${i + 1}.webp`, svg: shadowSvg(c.seed, c.blobs), webp: { quality: 60, alphaQuality: 100, effort: 6 } })),
   ...[7, 19, 31, 43, 55, 67].map((seed, i) => ({ name: `wisp-${i + 1}.webp`, svg: wispSvg(seed), webp: { quality: 70, alphaQuality: 100, effort: 6 } })),
+  { name: "ink-mask.webp", svg: inkMaskSvg(), webp: { quality: 20, alphaQuality: 100, effort: 6 }, measureCore: true },
 ]
 
 await mkdir(outDir, { recursive: true })
@@ -207,5 +234,22 @@ for (const job of jobs) {
   const info = await img.webp(job.webp).toFile(outDir + job.name)
   total += info.size
   console.log(`${job.name.padEnd(14)} ${info.width}x${info.height}  ${(info.size / 1024).toFixed(1)} KiB`)
+  if (job.measureCore) {
+    // walk 360 rays out from the centre: where the blot stops being solid (core) and where it ends
+    const { data, info: m } = await sharp(outDir + job.name).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    const alpha = (x, y) => data[(Math.round(y) * m.width + Math.round(x)) * 4 + 3]
+    let core = Infinity
+    let outer = 0
+    for (let a = 0; a < 360; a++) {
+      const dx = Math.cos((a * Math.PI) / 180)
+      const dy = Math.sin((a * Math.PI) / 180)
+      for (let r = 0; r < m.width / 2 - 1; r++) {
+        const v = alpha(m.width / 2 + dx * r, m.height / 2 + dy * r)
+        if (v < 250) core = Math.min(core, r)
+        if (v > 3) outer = Math.max(outer, r)
+      }
+    }
+    console.log(`  ink mask: solid core radius ${(core / m.width).toFixed(3)} x size (REVEAL.maskCore), blot reaches ${(outer / m.width).toFixed(3)} (must stay < 0.5)`)
+  }
 }
 console.log(`total          ${(total / 1024).toFixed(1)} KiB`)

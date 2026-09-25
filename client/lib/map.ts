@@ -7,6 +7,37 @@ export const MAP_BLUR = "data:image/webp;base64,UklGRgQFAABXRUJQVlA4WAoAAAAQAAAA
 export const LVL2 = 1.8
 export const LVL3 = 3.2
 
+// Zoom reveals terrain detail: `npm run lod` (scripts/split-lod.mjs) splits the traced map into three
+// tiers by shape size. Terrain fades in at LVL2 and detail at LVL3 (level-triggered CSS fades).
+export const LOD = {
+  enabled: true,        // false = the single protheka.min.svg, as before (fallback)
+  hysteresis: 0.1,      // a tier shown at its level only hides again below (level - this), so no flicker
+  base: "/maps/protheka-base.svg",       // landmasses, coastlines, lettering, banners, compass, frame
+  terrain: "/maps/protheka-terrain.svg", // mountain and forest masses, most labels
+  detail: "/maps/protheka-detail.svg",   // individual trees, fine ridges and texture
+  fallback: "/maps/protheka.min.svg",
+} as const
+
+// The zoom-reveal moment (MapContent.tsx). A tier switching ON soaks in outward from the focal point
+// (pinch midpoint / wheel cursor / double-click point, else the viewport centre) through an ink-blot CSS
+// mask on the tier's wrapper, grown with compositor-only transforms; the mask is removed when the spread
+// ends. OFF is a plain opacity fade. Pins that appear at a new level stamp in, closest to the focal point
+// first. prefers-reduced-motion: plain opacity fades, no spread, no stamp.
+export const REVEAL = {
+  enabled: true,                      // false = plain opacity fades (perf A/B)
+  spreadMs: 650,                      // ink spread duration
+  easing: [0.33, 1, 0.68, 1] as const, // cubic-bezier ease-out (cubic): quick soak, slow finish
+  fadeInMs: 220,                      // opacity ramp at the start of the spread (ink soaking, not a wipe)
+  fadeOutMs: 300,                     // switching OFF
+  mask: "/maps/atmos/ink-mask.webp",  // npm run atmos
+  maskStart: 0.12,                    // blot size at the start, x the visible part of the map (longer side)
+  maskScale: 1.1,                     // final size = the size whose solid core just covers the screen, x this
+  maskCore: 0.27,                     // solid core radius / texture size (printed by npm run atmos)
+  focalFreshMs: 1000,                 // a gesture's focal point counts for this long, then the viewport centre
+  pinStaggerMs: 50,                   // stamp-in delay between pins, by distance from the focal point
+  pinStampMs: 380,
+} as const
+
 // atmosphere tunables (textures: npm run atmos -> public/maps/atmos/)
 export const ATMOS = {
   paperOpacity: 0.4,    // paper grain, multiplied over the map

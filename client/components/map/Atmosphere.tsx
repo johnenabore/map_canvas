@@ -36,22 +36,30 @@ const WISPS = Array.from({ length: SMOKE.count }, (_, i) => {
   return { seconds, delay: -(i / SMOKE.count) * seconds, tex: (i % WISP_TEXTURES) + 1, variant: (i % 2) + 1 }
 })
 
-// Map-space atmosphere: lives inside .map, moves with it. Order matters for perf: paper and edges are
-// NOT promoted and sit below every promoted layer (shadows, smoke, birds, pins), so they stay in the
-// content layer's one-time raster and cost nothing per frame.
+// Paper grain, multiplied over the base map tier. Not promoted and painted right after the base, below
+// every promoted layer, so the multiply happens inside the content layer's raster and costs nothing per
+// frame. (Above the promoted terrain/detail tiers it would have to blend across composited layers, an
+// extra full-screen pass every frame during gestures, so those tiers sit above the paper instead.)
+export function MapPaper() {
+  return (
+    <div
+      aria-hidden
+      className="layer atmos-paper"
+      style={{
+        backgroundImage: `url(${ATMOS_DIR}/paper.webp)`,
+        backgroundSize: `${ATMOS.paperTile}px`,
+        opacity: ATMOS.paperOpacity,
+      }}
+    />
+  )
+}
+
+// Map-space atmosphere above the map tiers: lives inside .map, moves with it. The burnt edges sit above
+// the promoted terrain/detail tiers, so they're pre-promoted too (a static layer, rasterized once).
 export function MapSpaceAtmos() {
   return (
     <>
-      <div
-        aria-hidden
-        className="layer atmos-paper"
-        style={{
-          backgroundImage: `url(${ATMOS_DIR}/paper.webp)`,
-          backgroundSize: `${ATMOS.paperTile}px`,
-          opacity: ATMOS.paperOpacity,
-        }}
-      />
-      <div aria-hidden className="layer" style={{ backgroundImage: EDGES }} />
+      <div aria-hidden className="layer atmos-edges" style={{ backgroundImage: EDGES }} />
       <div aria-hidden className="layer atmos-shadows">
         {SHADOWS.map((s, i) => (
           <div

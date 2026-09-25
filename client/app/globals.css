@@ -84,8 +84,37 @@
 }
 /* ---- atmosphere (components/map/Atmosphere.tsx, Clouds.tsx; tunables in lib/map.ts ATMOS) ---- */
 
-/* map-space: paper + edges are not promoted; they live in the content layer's raster */
+/* ---- zoom reveals terrain detail (MapContent.tsx; tiers from scripts/split-lod.mjs, LOD in lib/map.ts) ----
+   Terrain and detail are separate tier images, each on its own promoted layer. They fade on the
+   compositor when .map gets data-terrain / data-detail (flipped once per level crossing, with
+   hysteresis), never through a continuous opacity change on the heavy map layer. The base tier is not
+   promoted: it stays in the content layer with the paper grain. */
+.map .lod-tier { opacity: 0; will-change: opacity; transition: opacity .3s ease-out; }
+.map[data-terrain] .lod-terrain,
+.map[data-detail] .lod-detail { opacity: 1; }
+/* switching ON, MapContent adds a temporary ink-blot mask to the tier wrapper (static, at its final
+   size) and grows it with compositor-only transform animations (wrapper scales up from the focal point,
+   the image inside scales down by the inverse); all of it is removed when the spread ends. OFF uses the
+   plain fade above. */
+
+/* pins appearing at a new zoom level stamp in (MapContent.tsx sets the stagger delay and duration):
+   transform + opacity on the pin button, scaling from its tip; KeepScale owns the wrapper's transform */
+@keyframes poi-stamp {
+  0%   { transform: scale(1.3); opacity: 0; }
+  55%  { transform: scale(0.94); opacity: 1; }
+  78%  { transform: scale(1.03); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.poi-pin.stamp {
+  animation-name: poi-stamp;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1);
+  animation-fill-mode: both;
+}
+
+/* map-space: the paper is not promoted (multiplies the base tier inside the content layer's raster);
+   the edges sit above the promoted tiers, so they're a pre-promoted static layer */
 .map .atmos-paper { mix-blend-mode: multiply; background-repeat: repeat; }
+.map .atmos-edges { will-change: transform; }
 .map .atmos-shadows { overflow: hidden; } /* clip the drift to the map */
 .map .atmos-shadow {
   position: absolute; aspect-ratio: 1;
@@ -245,4 +274,6 @@
   /* location focus: instant state changes, no ripple (MapShell doesn't create one either) */
   .map .poi > div, .poi-seal, .poi-glow, .poi-tip, .focus-spotlight, .poi-sheet[data-desktop] { transition: none; }
   .poi-ripple { display: none; }
+  .map .lod-tier { transition: none; } /* tiers switch instantly */
+  .poi-pin.stamp { animation: none; }
 }
